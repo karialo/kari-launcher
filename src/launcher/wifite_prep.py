@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -11,6 +13,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .foxhunt import ScanEntry, TargetInfo, _clean, _freq_to_channel, _trim_ssid
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 @dataclass
@@ -55,17 +60,31 @@ class WifitePrepController:
         self.selected_index = 0
         self.pending_target: TargetInfo | None = None
         self.last_error = ""
+        self.last_run_note = ""
         self.last_scan_started = 0.0
         self.last_scan_completed = 0.0
         self.last_scan_duration_s = 0.0
         self.last_scan_source = "none"
         self.scan_reset_attempted = False
+        self.run_pid: int | None = None
+        self.run_proc: subprocess.Popen[str] | None = None
+        self.run_started = 0.0
+        self.run_completed = 0.0
+        self.run_returncode: int | None = None
+        self.run_output: list[str] = []
+        self.run_output_pending: list[str] = []
+        self.run_output_limit = 12
+        self.run_output_flush_interval = max(0.2, float(cfg.get("run_output_flush_interval_seconds", 0.35) or 0.35))
+        self.run_output_last_flush = 0.0
+        self.run_command = _clean(
+            cfg.get("run_command", ""),
+            240,
+        )
         self.tool_ip = self._resolve_tool("ip", ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"])
         self.tool_iw = self._resolve_tool("iw", ["/usr/sbin/iw", "/sbin/iw", "/usr/bin/iw"])
         self.tool_sudo = self._resolve_tool("sudo", ["/usr/bin/sudo", "/bin/sudo"])
         self.tool_timeout = self._resolve_tool("timeout", ["/usr/bin/timeout", "/bin/timeout"])
         self.tool_airodump = self._resolve_tool("airodump-ng", ["/usr/sbin/airodump-ng", "/usr/bin/airodump-ng", "/bin/airodump-ng"])
-
     def _resolve_tool(self, name: str, fallbacks: list[str]) -> str:
         found = shutil.which(name)
         if found:
@@ -95,11 +114,130 @@ class WifitePrepController:
         return items + ["Back"] if items else ["Back"]
 
     def _idle_menu(self) -> list[str]:
-        items = ["Select Network"]
+        items = ["Select Network", "Run"]
         if self.pending_target is not None:
             items.append("Clear Target")
         items.extend(["Select Interface", "Back"])
         return items
+
+    def _run_age_s(self) -> float | None:
+        if not self.run_completed:
+            return None
+        return max(0.0, time.monotonic() - self.run_completed)
+
+    def _append_run_output(self, line: str) -> None:
+        text = ANSI_RE.sub("", line or "")
+        text = text.replace("\r", " ").replace("\x00", "")
+        text = _clean(text, 120)
+        if not text:
+            return
+        redraw = False
+        with self.lock:
+            self.run_output_pending.append(text)
+            now = time.monotonic()
+            if len(self.run_output_pending) >= 3 or (now - self.run_output_last_flush) >= self.run_output_flush_interval:
+                redraw = self._flush_run_output_locked(now)
+        if redraw:
+            self.redraw_cb()
+
+    def _flush_run_output_locked(self, now: float | None = None) -> bool:
+        if not self.run_output_pending:
+            return False
+        self.run_output.extend(self.run_output_pending)
+        if len(self.run_output) > self.run_output_limit:
+            self.run_output = self.run_output[-self.run_output_limit :]
+        self.run_output_pending = []
+        self.run_output_last_flush = time.monotonic() if now is None else now
+        return True
+
+    def _watch_run_output(self, proc: subprocess.Popen[str]) -> None:
+        try:
+            stream = proc.stdout
+            if stream is not None:
+                for raw in stream:
+                    self._append_run_output(raw.rstrip())
+        except Exception as exc:
+            self._append_run_output(f"reader error {exc}")
+        finally:
+            try:
+                rc = proc.wait(timeout=1.0)
+            except Exception:
+                rc = proc.poll()
+            redraw = False
+            with self.lock:
+                redraw = self._flush_run_output_locked()
+                self.run_proc = None
+                self.run_completed = time.monotonic()
+                self.run_returncode = rc
+                if rc not in (None, 0):
+                    self.last_error = f"run rc {rc}"
+                elif rc == 0 and self.last_error.startswith("run rc "):
+                    self.last_error = ""
+            if redraw:
+                self.redraw_cb()
+            else:
+                self.redraw_cb()
+
+    def _expand_command(self, template: str, target: TargetInfo | None) -> str:
+        replacements = {
+            "$WIFITE_TARGET_SSID": target.ssid if target is not None else "",
+            "$WIFITE_TARGET_BSSID": target.bssid if target is not None else "",
+            "$WIFITE_TARGET_CHANNEL": "" if target is None or target.channel is None else str(target.channel),
+            "$WIFITE_TARGET_SECURITY": target.security if target is not None else "",
+        }
+        expanded = template
+        for key, value in replacements.items():
+            expanded = expanded.replace(key, value)
+        return expanded
+
+    def _launch_run_command(self) -> bool:
+        if not self.run_command:
+            self.last_error = "Missing run command"
+            return False
+        env = os.environ.copy()
+        target = self.pending_target
+        env["WIFITE_TARGET_SSID"] = target.ssid if target is not None else ""
+        env["WIFITE_TARGET_BSSID"] = target.bssid if target is not None else ""
+        env["WIFITE_TARGET_CHANNEL"] = "" if target is None or target.channel is None else str(target.channel)
+        env["WIFITE_TARGET_SECURITY"] = target.security if target is not None else ""
+        command_text = self._expand_command(self.run_command, target)
+        try:
+            cmd = shlex.split(command_text)
+        except Exception as exc:
+            self.last_error = _clean(exc, 80)
+            return False
+        if not cmd:
+            self.last_error = "Empty run command"
+            return False
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=env,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            self.last_error = _clean(exc, 80)
+            return False
+        started = time.monotonic()
+        suffix = f" {target.ssid}" if target is not None and target.ssid else ""
+        with self.lock:
+            self.run_proc = proc
+            self.run_pid = proc.pid
+            self.run_started = started
+            self.run_completed = started
+            self.run_returncode = None
+            self.run_output = [f"$ {' '.join(cmd)}"]
+            self.run_output_pending = []
+            self.run_output_last_flush = started
+            self.last_run_note = f"{Path(cmd[0]).name} pid {proc.pid}{suffix}"
+            self.last_error = ""
+        watcher = threading.Thread(target=self._watch_run_output, args=(proc,), daemon=True)
+        watcher.start()
+        return True
 
     def _run_cmd(self, args: list[str], timeout: float = 8.0, privileged: bool = False) -> subprocess.CompletedProcess[str]:
         cmd = list(args)
@@ -539,6 +677,11 @@ class WifitePrepController:
             self._set_status("Wifite target cleared", 4.0)
             self.redraw_cb()
             return
+        if choice == "run":
+            ok = self._launch_run_command()
+            self._set_status(self.last_run_note if ok else self.last_error or "run failed", 4.0)
+            self.redraw_cb()
+            return
         if choice == "select interface":
             with self.lock:
                 self.state = "iface"
@@ -572,6 +715,11 @@ class WifitePrepController:
             self._set_status("Wifite target cleared", 4.0)
             self.redraw_cb()
             return True
+        if cmd in ("wf_run", "wf_run_hello"):
+            ok = self._launch_run_command()
+            self._set_status(self.last_run_note if ok else self.last_error or "run failed", 4.0)
+            self.redraw_cb()
+            return ok
         return False
 
     def status_payload(self) -> dict[str, Any]:
@@ -621,6 +769,11 @@ class WifitePrepController:
                 "pending_target": target,
                 "selected_scan": selected_row,
                 "last_error": self.last_error,
+                "last_run_note": self.last_run_note,
+                "run_pid": self.run_pid,
+                "run_age_s": self._run_age_s(),
+                "run_returncode": self.run_returncode,
+                "run_output": list(self.run_output),
                 "last_scan_source": self.last_scan_source,
                 "last_scan_age_s": self._last_scan_age_s(),
                 "last_scan_duration_s": self.last_scan_duration_s,
@@ -700,6 +853,11 @@ class WifitePrepController:
                 lines.append(
                     f"SCAN {'n/a' if age is None else f'{int(age)}s'}  DUR {int(self.last_scan_duration_s)}s"
                 )
+            if self.last_run_note:
+                lines.append(_clean(self.last_run_note, 28))
+            if self.run_output:
+                for item in self.run_output[-3:]:
+                    lines.append(_clean(item, 28))
             return WifitePrepView(
                 state="idle",
                 menu_open=self.menu_open,

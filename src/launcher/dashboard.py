@@ -65,6 +65,7 @@ from .animation import PageTransition
 from .angryoxide_menu import AngryOxideMenuController
 from .effects import HudEffects
 from .foxhunt import FoxhuntController
+from .lantern import LanternController
 from .theme import THEMES, Theme, load_theme_name_from_env, next_theme_name
 from .ui_primitives import GlowCache, PanelStyle, TextRenderer, draw_panel, draw_status_dot
 from .wifite_prep import WifitePrepController
@@ -120,6 +121,7 @@ SAFE_REMOTE_ACTIONS = {
     "goto_foxhunt",
     "goto_wifite",
     "goto_networkops",
+    "goto_lantern",
     "goto_overview",
     "goto_raspyjack",
     "goto_angryoxide",
@@ -136,8 +138,13 @@ SAFE_REMOTE_ACTIONS = {
     "wf_select_network",
     "wf_lock_target",
     "wf_clear_target",
+    "wf_run",
+    "wf_run_hello",
+    "lantern_refresh",
+    "lantern_clear",
     "net_refresh",
     "net_reconnect_wlan0",
+    "net_restart_launcher",
     "net_restart_networkmanager",
     "net_restart_tailscale",
     "net_iface_menu",
@@ -279,7 +286,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "interface": "wlan1",
         "scan_max_results": 32,
         "scan_interval_active_seconds": 4.0,
-        "run_command": "/home/kari/.local/bin/sd-list",
     },
     "network_ops": {
         "primary_iface": "wlan0",
@@ -2461,6 +2467,11 @@ class DashboardApp:
             set_iface_cb=self._set_wifite_iface,
             reset_iface_cb=self._reset_external_wifi,
         )
+        self.lantern = LanternController(
+            self.config.get("lantern", {}) if isinstance(self.config.get("lantern"), dict) else {},
+            status_cb=self._set_status,
+            redraw_cb=self._request_redraw,
+        )
         self.ao_menu = AngryOxideMenuController(
             self.config.get("angryoxide", {}) if isinstance(self.config.get("angryoxide"), dict) else {},
             status_cb=self._set_status,
@@ -2562,6 +2573,8 @@ class DashboardApp:
         self.foxhunt_worker.start()
         self.wifite_worker = threading.Thread(target=self._wifite_loop, daemon=True)
         self.wifite_worker.start()
+        self.lantern_worker = threading.Thread(target=self._lantern_loop, daemon=True)
+        self.lantern_worker.start()
         self.ao_menu_worker = threading.Thread(target=self._angryoxide_menu_loop, daemon=True)
         self.ao_menu_worker.start()
         if not self.preview_mode:
@@ -2652,6 +2665,7 @@ class DashboardApp:
 
     def _build_pages(self, snapshot: Snapshot) -> list[str]:
         pages = ["overview", "gps", "networkops"]
+        pages.append("lantern")
         pages.append("foxhunt")
         pages.append("wifite")
         pages.append("raspyjack")
@@ -2763,6 +2777,15 @@ class DashboardApp:
             except Exception as e:
                 self._set_status(f"Wifite loop: {clean_text(e, 48)}", 5.0)
             if self.stop_event.wait(timeout=1.0):
+                break
+
+    def _lantern_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.lantern.tick()
+            except Exception as e:
+                self._set_status(f"Lantern loop: {clean_text(e, 48)}", 5.0)
+            if self.stop_event.wait(timeout=2.0):
                 break
 
     def _angryoxide_menu_loop(self) -> None:
@@ -2973,6 +2996,9 @@ class DashboardApp:
             "wf_select_network": "wf_select_network",
             "wf_lock_target": "wf_lock_target",
             "wf_clear_target": "wf_clear_target",
+            "wf_run": "wf_run",
+            "lantern_refresh": "lantern_refresh",
+            "lantern_clear": "lantern_clear",
             "ao_toggle": "ao_toggle",
             "ao_scan_all": "ao_scan_all",
             "ao_select_network": "ao_select_network",
@@ -2986,6 +3012,7 @@ class DashboardApp:
             "overview": "goto_overview",
             "gps": "goto_gps",
             "networkops": "goto_networkops",
+            "lantern": "goto_lantern",
             "foxhunt": "goto_foxhunt",
             "wifite": "goto_wifite",
             "raspyjack": "goto_raspyjack",
@@ -3007,6 +3034,7 @@ class DashboardApp:
             "rj_runbook_web_bounce": "rj_runbook_web_bounce",
             "net_refresh": "net_refresh",
             "net_reconnect_wlan0": "net_reconnect_wlan0",
+            "net_restart_launcher": "net_restart_launcher",
             "net_restart_networkmanager": "net_restart_networkmanager",
             "net_restart_tailscale": "net_restart_tailscale",
             "net_iface_menu": "net_iface_menu",
@@ -3075,6 +3103,10 @@ class DashboardApp:
                 if self.wifite.block_page_cycle() and self.wifite.back():
                     self._log_remote_action(action, source, "ok")
                     return
+            if page == "lantern":
+                if self.lantern.block_page_cycle() and self.lantern.back():
+                    self._log_remote_action(action, source, "ok")
+                    return
             if page == "networkops":
                 if self.network_ops_menu_open:
                     if self.network_ops_menu_state == "mode":
@@ -3105,6 +3137,9 @@ class DashboardApp:
                 self._log_remote_action(action, source, "blocked")
                 return
             if page == "wifite" and self.wifite.block_page_cycle():
+                self._log_remote_action(action, source, "blocked")
+                return
+            if page == "lantern" and self.lantern.block_page_cycle():
                 self._log_remote_action(action, source, "blocked")
                 return
             if page == "networkops" and self.network_ops_menu_open:
@@ -3143,6 +3178,10 @@ class DashboardApp:
             return
         if action.startswith("wf_"):
             ok = self.wifite.remote_action(action)
+            self._log_remote_action(action, source, "ok" if ok else "invalid_state")
+            return
+        if action.startswith("lantern_"):
+            ok = self.lantern.remote_action(action)
             self._log_remote_action(action, source, "ok" if ok else "invalid_state")
             return
         if action.startswith("net_"):
@@ -3197,6 +3236,7 @@ class DashboardApp:
             "goto_overview": "overview",
             "goto_gps": "gps",
             "goto_networkops": "networkops",
+            "goto_lantern": "lantern",
             "goto_foxhunt": "foxhunt",
             "goto_wifite": "wifite",
             "goto_raspyjack": "raspyjack",
@@ -3220,6 +3260,7 @@ class DashboardApp:
             "Refresh",
             "Reconnect wlan0",
             "Reset wlan1",
+            "Restart Launcher",
             "Restart NetworkMgr",
             "Restart Tailscale",
             "Interface Modes",
@@ -3339,6 +3380,7 @@ class DashboardApp:
         wifi_profile = clean_text(cfg.get("wifi_profile", ""), 64)
         nm_service = clean_text(cfg.get("networkmanager_service", "NetworkManager.service"), 64)
         tailscale_service = clean_text(cfg.get("tailscale_service", "tailscaled.service"), 64)
+        launcher_service = clean_text(cfg.get("launcher_service", "kari-dashboard.service"), 64)
         if action == "Reconnect wlan0":
             if wifi_profile:
                 return (
@@ -3355,6 +3397,8 @@ class DashboardApp:
             return f"systemctl restart {shlex.quote(nm_service)}"
         if action == "Restart Tailscale":
             return f"systemctl restart {shlex.quote(tailscale_service)}"
+        if action == "Restart Launcher":
+            return f"systemctl restart {shlex.quote(launcher_service)}"
         if action == "Shutdown Device":
             return clean_text(cfg.get("shutdown_cmd", "/usr/bin/systemctl poweroff -i"), 160) or "/usr/bin/systemctl poweroff -i"
         if action == "Restart Device":
@@ -3448,8 +3492,11 @@ class DashboardApp:
         if not cmd:
             self._set_status(f"network: unsupported {action}", 6.0)
             return
-        if action in {"Shutdown Device", "Restart Device"}:
-            self._set_status("Shutdown requested" if action == "Shutdown Device" else "Reboot requested", 4.0)
+        if action in {"Restart Launcher", "Shutdown Device", "Restart Device"}:
+            if action == "Restart Launcher":
+                self._set_status("Launcher restart requested", 4.0)
+            else:
+                self._set_status("Shutdown requested" if action == "Shutdown Device" else "Reboot requested", 4.0)
             try:
                 subprocess.Popen(
                     ["/usr/bin/env", "bash", "-lc", cmd],
@@ -3487,6 +3534,7 @@ class DashboardApp:
             "net_refresh": "Refresh",
             "net_reconnect_wlan0": "Reconnect wlan0",
             "net_reset_wlan1": "Reset wlan1",
+            "net_restart_launcher": "Restart Launcher",
             "net_restart_networkmanager": "Restart NetworkMgr",
             "net_restart_tailscale": "Restart Tailscale",
             "net_iface_menu": "Interface Modes",
@@ -3793,6 +3841,7 @@ class DashboardApp:
             history = self._history_payload_locked()
         foxhunt = self.foxhunt.status_payload()
         wifite = self.wifite.status_payload()
+        lantern = self.lantern.status_payload()
         with self.data_lock:
             ao_running = bool(self.snapshot.angryoxide.running)
         ao_menu = self.ao_menu.status_payload(ao_running)
@@ -3817,6 +3866,9 @@ class DashboardApp:
             },
             "wifite": {
                 **wifite,
+            },
+            "lantern": {
+                **lantern,
             },
             "local": {
                 "tailscale_ip": snap.tailscale_ip,
@@ -4370,6 +4422,7 @@ class DashboardApp:
           <button class="nav-btn" data-nav="overview" onclick="act('overview')">Overview<small>mission summary</small></button>
           <button class="nav-btn" data-nav="gps" onclick="act('gps')">GPS<small>satellite lock</small></button>
           <button class="nav-btn" data-nav="networkops" onclick="act('networkops')">Network Ops<small>interfaces and recovery</small></button>
+          <button class="nav-btn" data-nav="lantern" onclick="act('lantern')">Lantern<small>local host discovery</small></button>
           <button class="nav-btn" data-nav="foxhunt" onclick="act('foxhunt')">FoxHunt<small>recon and tracking</small></button>
           <button class="nav-btn" data-nav="wifite" onclick="act('wifite')">Wifite<small>passive target prep</small></button>
           <button class="nav-btn" data-nav="raspyjack" onclick="act('raspyjack')">RaspyJack<small>stack and loot</small></button>
@@ -4443,6 +4496,7 @@ class DashboardApp:
           <div class="controls">
             <button class="action-btn" onclick="act('net_refresh')">Refresh Data</button>
             <button class="action-btn" onclick="act('net_reconnect_wlan0')">Reconnect wlan0</button>
+            <button class="action-btn" onclick="act('net_restart_launcher')">Restart Launcher</button>
             <button class="action-btn" onclick="act('net_restart_networkmanager')">Restart NetworkManager</button>
             <button class="action-btn" onclick="act('net_restart_tailscale')">Restart Tailscale</button>
             <button class="action-btn" onclick="act('net_iface_menu')">Interface Modes</button>
@@ -4450,6 +4504,17 @@ class DashboardApp:
             <button class="action-btn" onclick="act('net_reboot')">Restart Device</button>
           </div>
           <div class="controls" id="netIfaceControls"></div>
+        </section>
+
+        <section class="panel page" data-view="lantern">
+          <h3 class="section-title">Lantern</h3>
+          <div class="blurb mono" id="lantern">loading...</div>
+          <div class="controls">
+            <button class="action-btn" onclick="act('lantern_refresh')">Refresh Data</button>
+            <button class="action-btn" onclick="act('lantern_clear')">Clear Cache</button>
+            <button class="action-btn" onclick="act('refresh')">Refresh Launcher</button>
+          </div>
+          <pre class="log" id="lanternlog">(loading)</pre>
         </section>
 
         <section class="panel page" data-view="foxhunt">
@@ -4474,6 +4539,7 @@ class DashboardApp:
           <div class="controls">
             <button class="action-btn" onclick="act('wf_select_network')">Select Network</button>
             <button class="action-btn" onclick="act('wf_lock_target')">Set Target</button>
+            <button class="action-btn" onclick="act('wf_run')">Run</button>
             <button class="action-btn" onclick="act('wf_clear_target')">Clear Target</button>
             <button class="action-btn" onclick="act('refresh')">Refresh Data</button>
           </div>
@@ -4555,6 +4621,7 @@ class DashboardApp:
       overview: { title: "Overview", desc: "Live mission summary and device health." },
       gps: { title: "GPS", desc: "Satellite lock, fix quality, and receiver detail." },
       networkops: { title: "Network Ops", desc: "Interface state, services, and recovery actions." },
+      lantern: { title: "Lantern", desc: "Local subnet neighbors and cached host presence." },
       foxhunt: { title: "FoxHunt", desc: "Wireless recon, target lock, and hunt state." },
       wifite: { title: "Wifite", desc: "Passive network selection and target prep." },
       raspyjack: { title: "RaspyJack", desc: "Stack state, loot, and latest nmap output." },
@@ -4773,6 +4840,38 @@ class DashboardApp:
             }).join("")
           : `<div class="blurb mono" style="margin:0; grid-column:1 / -1;">no external adapters detected</div>`;
 
+        const lantern = d.lantern || {};
+        const lanternSelected = lantern.selected_host || {};
+        const lanternLastAge = (lantern.last_refresh_age_s === null || lantern.last_refresh_age_s === undefined) ? "n/a" : `${Math.round(Number(lantern.last_refresh_age_s))}s`;
+        const lanternLastDur = (lantern.last_refresh_duration_s === null || lantern.last_refresh_duration_s === undefined) ? "n/a" : `${Math.round(Number(lantern.last_refresh_duration_s))}s`;
+        const pad = (value, width) => String(value ?? "").slice(0, width).padEnd(width, " ");
+        document.getElementById("lantern").innerHTML =
+          `mode ${esc(lantern.state || "idle")} | iface ${esc(lantern.iface || "wlan0")}<br>` +
+          `hosts ${esc(lantern.host_count ?? 0)} | self ${esc(lantern.local_ip || "n/a")} | gw ${esc(lantern.gateway || "n/a")}<br>` +
+          `selected ${esc(lanternSelected.label || lanternSelected.hostname || lanternSelected.ip || "none")} | mac ${esc(lanternSelected.mac || "--")}<br>` +
+          `vendor ${esc(lanternSelected.vendor || "n/a")}<br>` +
+          `source ${esc(lantern.last_source || "none")} | last ${esc(lanternLastAge)} | dur ${esc(lanternLastDur)}<br>` +
+          `status ${esc(lantern.last_error || "ready")}`;
+        const lanternRows = (lantern.entries || []).slice(0, 8).map((row, idx) => {
+          const pointer = idx === Number(lantern.selected_index || 0) ? ">" : " ";
+          const label = row.label || row.hostname || row.ip || "host";
+          let state = String(row.state || "").toLowerCase();
+          if (state === "reachable") state = "LIVE";
+          else if (state === "stale" || state === "delay") state = "SEEN";
+          else if (state === "probe") state = "PROBE";
+          else if (state === "arp") state = "ARP";
+          else if (state === "incomplete") state = "WAIT";
+          else if (state === "failed") state = "MISS";
+          else state = state.slice(0, 6).toUpperCase();
+          return `${pointer} ${pad(label, 18)} ${pad(row.ip || "", 15)} ${pad(row.mac || "--", 17)} ${pad(state, 5)}`;
+        });
+        if (lanternRows.length){
+          lanternRows.unshift(`${pad("HOST", 20)} ${pad("IP", 15)} ${pad("MAC", 17)} STATE`);
+          lanternRows.splice(1, 0, "");
+        }
+        document.getElementById("lanternlog").textContent =
+          lanternRows.length ? lanternRows.join("\\n") : "(no local hosts discovered)";
+
         const fh = d.foxhunt || {};
         const fhView = fh.view || {};
         const fhTarget = fh.target || {};
@@ -4798,22 +4897,33 @@ class DashboardApp:
         const wfSelected = wf.selected_scan || {};
         const wfLastAge = (wf.last_scan_age_s === null || wf.last_scan_age_s === undefined) ? "n/a" : `${Math.round(Number(wf.last_scan_age_s))}s`;
         const wfLastDur = (wf.last_scan_duration_s === null || wf.last_scan_duration_s === undefined) ? "n/a" : `${Math.round(Number(wf.last_scan_duration_s))}s`;
+        const wfRunAge = (wf.run_age_s === null || wf.run_age_s === undefined) ? "n/a" : `${Math.round(Number(wf.run_age_s))}s`;
         const wfSource = wf.last_scan_source || "none";
+        const wfRunRc = (wf.run_returncode === null || wf.run_returncode === undefined) ? "running" : String(wf.run_returncode);
         document.getElementById("wifite").innerHTML =
           `mode ${esc(wf.state || "idle")} | iface ${esc(wf.iface || "wlan1")}<br>` +
           `target ${esc(wfTarget.ssid || "none")} | bssid ${esc(wfTarget.bssid ? String(wfTarget.bssid).slice(-8) : "--")}<br>` +
           `channel ${esc(wfTarget.channel ?? "n/a")} | security ${esc(wfTarget.security || "n/a")} | rssi ${esc(wfTarget.rssi ?? "n/a")}<br>` +
           `scan results ${esc(wf.scan_count ?? 0)} | source ${esc(wfSource)} | last ${esc(wfLastAge)} | dur ${esc(wfLastDur)}<br>` +
           `selected ${esc(wfSelected.ssid || "none")} | ch ${esc(wfSelected.channel ?? "n/a")} | rssi ${esc(wfSelected.rssi ?? "n/a")}<br>` +
+          `run ${esc(wf.last_run_note || "idle")} | age ${esc(wfRunAge)} | rc ${esc(wfRunRc)}<br>` +
           `status ${esc(wf.last_error || "ready")}`;
         const wfScanRows = (wf.scan_results || []).slice(0, 5).map((row, idx) => {
           const pointer = idx === Number(wf.selected_index || 0) ? ">" : " ";
           return `${pointer} ${(row.ssid || "<hidden>").slice(0, 12)}  ${row.rssi ?? "n/a"}  ${row.channel ?? "--"} ${String((row.security || "").slice(0, 1) || "-").toUpperCase()}`;
         });
+        const wfIdleRows = (wf.view && wf.view.lines && wf.view.lines.length) ? wf.view.lines.slice() : [];
+        if (wf.run_output && wf.run_output.length) {
+          wfIdleRows.push("");
+          wfIdleRows.push(...wf.run_output.slice(-8));
+        } else if (wf.last_run_note) {
+          wfIdleRows.push("");
+          wfIdleRows.push(`RUN ${wf.last_run_note}`);
+        }
         document.getElementById("wifitelog").textContent =
           wf.state === "scan"
             ? (wfScanRows.length ? wfScanRows.join("\\n") : "(no APs visible)")
-            : ((wf.view && wf.view.lines && wf.view.lines.length) ? wf.view.lines.join("\\n") : "(no target selected)");
+            : (wfIdleRows.length ? wfIdleRows.join("\\n") : "(no target selected)");
 
         const rj = d.raspyjack || {};
         const latestNmap = rj.latest_nmap || {};
@@ -5075,6 +5185,8 @@ class DashboardApp:
             return self.foxhunt.footer_text()
         if page == "wifite":
             return self.wifite.footer_text()
+        if page == "lantern":
+            return self.lantern.footer_text()
         if page == "networkops":
             if self.network_ops_menu_open:
                 return "U/D select  OK run  Y close  K3 home"
@@ -5533,6 +5645,32 @@ class DashboardApp:
             footer = f"{selected + 1}/{total}"
             self._blit_text(footer, 11, theme.neon_secondary, (menu_rect.right - 38, menu_rect.bottom - 15))
 
+    def _draw_lantern_page(self, theme: Theme, snap: Snapshot) -> None:
+        view = self.lantern.render_view()
+        lines: list[tuple[str, tuple[int, int, int]]] = []
+        for idx, line in enumerate(view.lines[:4]):
+            color = theme.dim_text if idx < 4 else theme.text
+            lines.append((line, color))
+        if view.list_rows:
+            lines.append(("", theme.dim_text))
+            for idx, row in enumerate(view.list_rows):
+                prefix = ">" if idx == view.list_selected else " "
+                state = clean_text(row[3], 6)
+                lines.append((clean_text(f"{prefix} {row[0]} {state}", 34), theme.text))
+                lines.append((clean_text(f"  IP {row[1]}", 34), theme.dim_text))
+                lines.append((clean_text(f"  MAC {row[2]}", 34), theme.dim_text))
+                lines.append(("", theme.dim_text))
+            selected_line = 5 + (view.list_selected * 4)
+            visible_rows = 6
+            max_off = max(0, len(lines) - visible_rows)
+            desired_off = max(0, min(selected_line - 2, max_off))
+            self.page_scroll["lantern"] = desired_off
+        else:
+            lines.append(("(no local hosts)", theme.dim_text))
+        self._draw_main_panel(theme, "LOCAL DISCOVERY", "Lantern", lines, "lantern")
+        if view.menu_open:
+            self._draw_foxhunt_menu(theme, view.menu_title, view.menu_items, view.menu_index)
+
     def _draw_wifite_page(self, theme: Theme, snap: Snapshot) -> None:
         view = self.wifite.render_view()
         if view.state == "scan":
@@ -5568,7 +5706,10 @@ class DashboardApp:
             self._blit_text("S", 11, theme.dim_text, (198, 86))
             return
 
-        lines = [(line, theme.text) for line in view.lines[:6]]
+        lines: list[tuple[str, tuple[int, int, int]]] = []
+        for idx, line in enumerate(view.lines):
+            color = theme.dim_text if idx < 6 else theme.text
+            lines.append((line, color))
         self._draw_main_panel(theme, "PASSIVE PREP", "Wifite", lines, "wifite")
         if view.menu_open:
             self._draw_foxhunt_menu(theme, view.menu_title, view.menu_items, view.menu_index)
@@ -5660,6 +5801,8 @@ class DashboardApp:
                 self._draw_gps_page(theme, snap)
             elif page == "networkops":
                 self._draw_network_ops_page(theme, snap)
+            elif page == "lantern":
+                self._draw_lantern_page(theme, snap)
             elif page.startswith("node:"):
                 self._draw_node_page(theme, snap, page.split(":", 1)[1])
             elif page == "foxhunt":
@@ -5957,6 +6100,9 @@ class DashboardApp:
         if page == "wifite":
             self.wifite.move(delta)
             return
+        if page == "lantern":
+            self.lantern.move(delta)
+            return
         if page == "networkops":
             if self.network_ops_menu_open:
                 count = len(self._network_ops_menu_items())
@@ -5984,6 +6130,9 @@ class DashboardApp:
             return
         if page == "wifite":
             self.wifite.ok()
+            return
+        if page == "lantern":
+            self.lantern.ok()
             return
         if page == "overview":
             self._set_status("Refreshing...", 3.0)
@@ -6030,6 +6179,16 @@ class DashboardApp:
                 self.wifite.secondary()
             elif key == pygame.K_F3:
                 if not self.wifite.back():
+                    self._set_page_index(self._home_page_index(), direction=-1)
+            return
+
+        if page == "lantern":
+            if key in (pygame.K_x, pygame.K_RETURN, pygame.K_F1):
+                self.lantern.ok()
+            elif key in (pygame.K_y, pygame.K_F2):
+                self.lantern.secondary()
+            elif key == pygame.K_F3:
+                if not self.lantern.back():
                     self._set_page_index(self._home_page_index(), direction=-1)
             return
 
@@ -6133,6 +6292,9 @@ class DashboardApp:
                             if self._current_page() == "wifite":
                                 if self.wifite.block_page_cycle() and self.wifite.back():
                                     continue
+                            if self._current_page() == "lantern":
+                                if self.lantern.block_page_cycle() and self.lantern.back():
+                                    continue
                             if self._current_page() == "networkops":
                                 if self.network_ops_menu_open:
                                     if self.network_ops_menu_state == "mode":
@@ -6157,6 +6319,8 @@ class DashboardApp:
                             if self._current_page() == "foxhunt" and self.foxhunt.block_page_cycle():
                                 continue
                             if self._current_page() == "wifite" and self.wifite.block_page_cycle():
+                                continue
+                            if self._current_page() == "lantern" and self.lantern.block_page_cycle():
                                 continue
                             if self._current_page() == "networkops" and self.network_ops_menu_open:
                                 continue
@@ -6212,6 +6376,10 @@ class DashboardApp:
             pass
         try:
             self.wifite_worker.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            self.lantern_worker.join(timeout=1.0)
         except Exception:
             pass
         try:
