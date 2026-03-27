@@ -19,7 +19,7 @@ Current hardware target:
 - Front buttons: `KEY1`, `KEY2`, `KEY3`
 - Optional PiSugar battery telemetry
 
-Default input pin mapping is defined in [dashboard.py](/home/kari/Projects/kari-launcher/src/launcher/dashboard.py):
+Default input pin mapping is defined in `src/launcher/dashboard.py`:
 
 ```json
 "input": {
@@ -219,6 +219,15 @@ Important top-level keys:
 - `managed_apps`: managed fullscreen or handoff-style apps
 - `nodes`: remote systems shown in overview and node summaries
 - `raspyjack`, `angryoxide`, `foxhunt`, `wifite`, `lantern`, `network_ops`, `remote`: page-specific settings
+
+Practical note before you get too comfortable:
+
+- this project does not auto-detect your install layout
+- it does not auto-discover third-party tool paths
+- it does not auto-map service names for you
+- it does not know where your helper scripts live
+
+Most users will need to change paths, service names, hostnames, interfaces, and command strings to fit their own box.
 
 ### Minimal example config
 
@@ -480,7 +489,7 @@ Example placeholder:
   "interface": "wlan1",
   "scan_max_results": 32,
   "scan_interval_active_seconds": 4.0,
-  "run_command": "/home/kari/.local/bin/sd-list"
+  "run_command": "/home/<user>/.local/bin/sd-list"
 }
 ```
 
@@ -499,8 +508,8 @@ Managed-app page for handing the display over to RaspyJack through external wrap
 
 Defaults:
 
-- start: `/home/kari/Projects/start_raspyjack.sh`
-- stop: `/home/kari/Projects/stop_raspyjack.sh`
+- start: `/home/<user>/Projects/kari-launcher/start_raspyjack.sh`
+- stop: `/home/<user>/Projects/kari-launcher/stop_raspyjack.sh`
 
 Use it for:
 
@@ -525,6 +534,13 @@ In practice that means new users should:
 2. Make sure it can run successfully on its own before integrating it with K.A.R.I.
 3. Disable or avoid any RaspyJack service that would auto-start it at boot.
 4. Provide launcher-controlled wrapper scripts for start and stop.
+
+This repository includes example launcher-side wrappers:
+
+- `start_raspyjack.sh`
+- `stop_raspyjack.sh`
+
+They are examples, not sacred texts. Expect to edit them.
 
 Why this matters:
 
@@ -553,8 +569,8 @@ The launcher points to those wrappers here:
 "managed_apps": {
   "raspyjack": {
     "label": "RaspyJack",
-    "start_cmd": "/home/kari/Projects/start_raspyjack.sh",
-    "stop_cmd": "/home/kari/Projects/stop_raspyjack.sh",
+    "start_cmd": "/home/<user>/Projects/kari-launcher/start_raspyjack.sh",
+    "stop_cmd": "/home/<user>/Projects/kari-launcher/stop_raspyjack.sh",
     "status_cmd": "systemctl is-active raspyjack.service raspyjack-device.service raspyjack-webui.service",
     "takes_over_display": true
   }
@@ -562,6 +578,12 @@ The launcher points to those wrappers here:
 ```
 
 If you keep the wrappers stable, the launcher integration stays simple.
+
+This repository also includes a small audited patch bundle at:
+
+- `third_party/raspyjack_patch/`
+
+That bundle contains only the files we could justify as part of the 1.3in/ST7789 display port after comparing a fresh RaspyJack clone with the modified snapshot. It is intentionally narrower than “everything that ever changed”.
 
 ### Making RaspyJack Work on the Waveshare 1.3in Display
 
