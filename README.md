@@ -583,7 +583,7 @@ This repository also includes a small audited patch bundle at:
 
 - `third_party/raspyjack_patch/`
 
-That bundle contains only the files we could justify as part of the 1.3in/ST7789 display port after comparing a fresh RaspyJack clone with the modified snapshot. It is intentionally narrower than “everything that ever changed”.
+That bundle contains only the files we could justify as part of the 1.3in/ST7789 display port after comparing a fresh RaspyJack clone with the modified snapshot, plus one optional `Return to Launcher` menu hook. It is intentionally narrower than “everything that ever changed”.
 
 ### Making RaspyJack Work on the Waveshare 1.3in Display
 

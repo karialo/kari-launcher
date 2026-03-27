@@ -2,12 +2,20 @@
 
 This directory contains the RaspyJack files we can justify as part of the Waveshare 1.3in ST7789 port.
 
+Full credit for RaspyJack itself belongs to the original project and its author, `7h30th3r0n3`.
+
+This bundle is not presented as a fork or a rewrite. It is a narrow compatibility patch set for people who want to run RaspyJack on a Waveshare 1.3in display and, optionally, hand control back to this launcher cleanly.
+
 The bundle was built by comparing:
 
 - a fresh RaspyJack clone on Freyja at `~/Projects/Raspyjack`
 - a modified RaspyJack snapshot from `Raspyjack.zip`
 
-Only files with clear display-port changes were included.
+Only files with clear display-port changes were included, with one deliberate exception:
+
+- an optional `Return to Launcher` menu hook in `raspyjack.py`
+
+That hook exists purely to hand control back to the launcher. Outside of that one menu option, this bundle is intentionally limited to display-compatibility work.
 
 ## Included Files
 
@@ -42,6 +50,12 @@ This is where the main display-port work happened:
 - splash handling changes
 - path cleanup from hard-coded `/root/Raspyjack`
 
+This bundled copy also includes one optional launcher integration:
+
+- a `Return to Launcher` menu item
+
+That menu item does not change RaspyJack's payload model, WebUI, or core workflow. It simply runs a user-supplied command so your launcher wrapper can stop RaspyJack and resume your own dashboard.
+
 ## How Legacy Payloads Keep Working
 
 This was the important trick.
@@ -70,6 +84,23 @@ lcd.LCD_Init(LCD_1in44.SCAN_DIR_DFT)
 ```
 
 and they will still function, because `LCD_1in44` is now acting as a bridge when the ST7789 backend is selected.
+
+## Optional Launcher Return Hook
+
+If you want the on-device RaspyJack menu to hand control back to your launcher, set:
+
+```bash
+export RJ_RETURN_TO_LAUNCHER_CMD="/home/<user>/Projects/kari-launcher/stop_raspyjack.sh >/dev/null 2>&1"
+```
+
+The bundled `raspyjack.py` adds `Return to Launcher` in:
+
+- the main menu
+- the `System` menu
+
+If `RJ_RETURN_TO_LAUNCHER_CMD` is not set, the menu entry stays visible but does nothing except show a short configuration reminder.
+
+This is intentional. It keeps the patch generic for public use instead of hard-coding one person's launcher path.
 
 ## If You Want To Port Additional Payloads Yourself
 
@@ -134,19 +165,25 @@ Reasons they were excluded:
    - `LCD_ST7789.py`
    - `raspyjack.py`
 3. Keep your existing payloads unless you have separately audited and chosen to replace them.
-4. Run RaspyJack with:
+4. If you want launcher handoff, export:
+
+```bash
+export RJ_RETURN_TO_LAUNCHER_CMD="/home/<user>/Projects/kari-launcher/stop_raspyjack.sh >/dev/null 2>&1"
+```
+
+5. Run RaspyJack with:
 
 ```bash
 RJ_LCD=st7789 RJ_ROTATE=0 sudo -E python3 raspyjack.py
 ```
 
-5. If the screen orientation is wrong, adjust `RJ_ROTATE`.
+6. If the screen orientation is wrong, adjust `RJ_ROTATE`.
 
 ## Important Notes
 
 - This bundle is not a full RaspyJack fork.
 - It is not an installer.
 - It is not a promise that every payload is now “240x240 aware”.
-- It is the smallest set of files we can currently defend as the actual 1.3in/ST7789 port.
+- It is the smallest set of files we can currently defend as the actual 1.3in/ST7789 port, plus one optional launcher-return menu item.
 
 If you later want a larger patch set, generate it from a fresh upstream diff and document the reason for each extra file.

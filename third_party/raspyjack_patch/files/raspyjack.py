@@ -21,6 +21,7 @@ import rj_input  # Virtual input bridge (WebSocket → Unix socket)
 
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _lcd_backend = os.environ.get("RJ_LCD", "st7735").strip().lower()
+_return_to_launcher_cmd = os.environ.get("RJ_RETURN_TO_LAUNCHER_CMD", "").strip()
 if _lcd_backend == "st7789":
     import LCD_ST7789 as LCD_DRIVER
 elif _lcd_backend == "st7735":
@@ -370,6 +371,39 @@ def Restart():
     arg = ["-n","-5",os.sys.executable] + sys.argv
     os.execv(os.popen("whereis nice").read().split(" ")[1], arg)
     Leave()
+
+
+def ReturnToLauncher():
+    if not _return_to_launcher_cmd:
+        print("RJ_RETURN_TO_LAUNCHER_CMD is not configured.")
+        try:
+            Dialog_info("Set RJ_RETURN_TO_LAUNCHER_CMD", wait=True, timeout=2)
+        except Exception:
+            pass
+        return
+
+    print("Returning to launcher...")
+    try:
+        Dialog("Returning...", False)
+    except Exception:
+        pass
+    try:
+        _stop_evt.set()
+    except Exception:
+        pass
+    try:
+        GPIO.cleanup()
+    except Exception:
+        pass
+    subprocess.Popen(
+        ["/usr/bin/env", "bash", "-lc", _return_to_launcher_cmd],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    time.sleep(0.4)
+    sys.exit(0)
 
 
 def safe_kill(*names):
@@ -2400,6 +2434,7 @@ class DisposableMenu:
             [" Other features", "ag"],     # g
             [" Read file",      "ah"],     # h
             [" Payload", "ap"],            # p
+            [" Return to Launcher", ReturnToLauncher],
         ),
 
         "ab": tuple(
@@ -2440,6 +2475,7 @@ class DisposableMenu:
         ),
 
         "af": (
+            [" Return to Launcher", ReturnToLauncher],
             [" Shutdown system", [Leave, True]],
             [" Restart UI",      Restart]
         ),
