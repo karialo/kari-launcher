@@ -1,0 +1,21 @@
+[Unit]
+Description=KARI DisplayHAT Mini Dashboard
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory={{PROJECT_DIR}}
+Environment=PYTHONUNBUFFERED=1
+Environment=DHM_DASH_CONFIG={{DASH_CONFIG}}
+Environment=LAUNCHER_FPS=12
+ExecStart={{PROJECT_DIR}}/bin/dashboard
+Restart=always
+RestartSec=2
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

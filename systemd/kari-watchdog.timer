@@ -1,0 +1,13 @@
+[Unit]
+Description=Run KARI connectivity watchdog periodically
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=15s
+Persistent=true
+Unit=kari-watchdog.service
+
+[Install]
+WantedBy=timers.target
+

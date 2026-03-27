@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+export PYTHONPATH="$HERE/src${PYTHONPATH:+:$PYTHONPATH}"
+if [[ -x "$HERE/.venv/bin/python" ]]; then
+  exec "$HERE/.venv/bin/python" -m launcher.dashboard "$@"
+fi
+exec python3 -m launcher.dashboard "$@"

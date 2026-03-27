@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
+STATE_DIR="${KARI_WD_STATE_DIR:-/var/lib/kari-watchdog}"
+FAIL_FILE="${STATE_DIR}/fail_count"
+
+MAX_FAILURES="${KARI_WD_MAX_FAILURES:-5}"
+RECHECK_DELAY="${KARI_WD_RECHECK_DELAY:-6}"
+CURL_TIMEOUT="${KARI_WD_CURL_TIMEOUT:-4}"
+REBOOT_ON_FAIL="${KARI_WD_REBOOT_ON_FAIL:-true}"
+BOOT_GRACE_SECONDS="${KARI_WD_BOOT_GRACE_SECONDS:-180}"
+
+PING_TARGETS="${KARI_WD_PING_TARGETS:-1.1.1.1 8.8.8.8}"
+LAUNCHER_URL="${KARI_WD_LAUNCHER_URL:-http://127.0.0.1:8787/}"
+RASPYJACK_URL="${KARI_WD_RASPYJACK_URL:-http://127.0.0.1:8080}"
+
+CHECK_INTERNET="${KARI_WD_CHECK_INTERNET:-true}"
+CHECK_TAILSCALE="${KARI_WD_CHECK_TAILSCALE:-true}"
+CHECK_LAUNCHER="${KARI_WD_CHECK_LAUNCHER:-true}"
+CHECK_RASPYJACK="${KARI_WD_CHECK_RASPYJACK:-false}"
+TREAT_INTERNET_ONLY_DOWN_AS_FAILURE="${KARI_WD_TREAT_INTERNET_ONLY_DOWN_AS_FAILURE:-false}"
+
+NETWORK_SERVICES="${KARI_WD_NETWORK_SERVICES:-NetworkManager.service}"
+TAILSCALE_SERVICE="${KARI_WD_TAILSCALE_SERVICE:-tailscaled.service}"
+LAUNCHER_SERVICE="${KARI_WD_LAUNCHER_SERVICE:-kari-dashboard.service}"
+RASPYJACK_SERVICES="${KARI_WD_RASPYJACK_SERVICES:-raspyjack-webui.service caddy.service raspyjack.service raspyjack-device.service}"
+
+log() {
+  local msg="$*"
+  printf '[kari-watchdog] %s\n' "${msg}"
+  logger -t kari-watchdog -- "${msg}" >/dev/null 2>&1 || true
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+is_true() {
+  [[ "$1" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss]|[Oo][Nn])$ ]]
+}
+
+uptime_seconds() {
+  local uptime
+  uptime="$(cut -d'.' -f1 /proc/uptime 2>/dev/null || echo 0)"
+  if [[ ! "${uptime}" =~ ^[0-9]+$ ]]; then
+    uptime=0
+  fi
+  printf '%s\n' "${uptime}"
+}
+
+unit_exists() {
+  local unit="$1"
+  local state
+  state="$(systemctl show -p LoadState --value "${unit}" 2>/dev/null || true)"
+  [[ -n "${state}" && "${state}" != "not-found" ]]
+}
+
+restart_if_exists() {
+  local unit="$1"
+  if ! unit_exists "${unit}"; then
+    log "skip restart for missing unit: ${unit}"
+    return 1
+  fi
+  log "restarting ${unit}"
+  if systemctl restart "${unit}"; then
+    return 0
+  fi
+  log "restart failed: ${unit}"
+  return 1
+}
+
+check_ping_online() {
+  local target
+  for target in ${PING_TARGETS}; do
+    if ping -n -c 1 -W 2 "${target}" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+check_http() {
+  local url="$1"
+  [[ -n "${url}" ]] || return 1
+  if command_exists curl; then
+    curl -fsS --max-time "${CURL_TIMEOUT}" "${url}" >/dev/null
+    return $?
+  fi
+  if command_exists wget; then
+    wget -q -T "${CURL_TIMEOUT}" -O /dev/null "${url}"
+    return $?
+  fi
+  return 1
+}
+
+check_tailscale_ok() {
+  local svc_known=0
+
+  if unit_exists "${TAILSCALE_SERVICE}"; then
+    svc_known=1
+    if ! systemctl is-active --quiet "${TAILSCALE_SERVICE}"; then
+      return 1
+    fi
+  fi
+
+  if command_exists tailscale; then
+    local ts_ip
+    ts_ip="$(tailscale ip -4 2>/dev/null | head -n 1 || true)"
+    [[ -n "${ts_ip}" ]] || return 1
+    return 0
+  fi
+
+  [[ "${svc_known}" -eq 1 ]]
+}
+
+check_launcher_ok() {
+  local svc_known=0
+
+  if unit_exists "${LAUNCHER_SERVICE}"; then
+    svc_known=1
+    if ! systemctl is-active --quiet "${LAUNCHER_SERVICE}"; then
+      return 1
+    fi
+  fi
+
+  if [[ -n "${LAUNCHER_URL}" ]]; then
+    if check_http "${LAUNCHER_URL}"; then
+      return 0
+    fi
+    if [[ "${svc_known}" -eq 1 ]]; then
+      log "launcher URL check failed; service is active (${LAUNCHER_SERVICE})"
+      return 0
+    fi
+    return 1
+  fi
+
+  [[ "${svc_known}" -eq 1 ]]
+}
+
+check_raspyjack_ok() {
+  local svc_known=0
+  local svc_active=0
+  local rj
+
+  for rj in ${RASPYJACK_SERVICES}; do
+    if unit_exists "${rj}"; then
+      svc_known=1
+      if systemctl is-active --quiet "${rj}"; then
+        svc_active=1
+      fi
+    fi
+  done
+
+  if [[ -n "${RASPYJACK_URL}" ]] && check_http "${RASPYJACK_URL}"; then
+    return 0
+  fi
+  if [[ "${svc_active}" -eq 1 ]]; then
+    return 0
+  fi
+  if [[ "${svc_known}" -eq 0 && -z "${RASPYJACK_URL}" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+status_word() {
+  local enabled="$1"
+  local ok="$2"
+  if ! is_true "${enabled}"; then
+    printf 'skip'
+    return 0
+  fi
+  if [[ "${ok}" -eq 1 ]]; then
+    printf 'up'
+  else
+    printf 'down'
+  fi
+}
+
+restart_network_stack() {
+  local svc
+  local first_existing=""
+  for svc in ${NETWORK_SERVICES}; do
+    if unit_exists "${svc}"; then
+      if [[ -z "${first_existing}" ]]; then
+        first_existing="${svc}"
+      fi
+      if systemctl is-active --quiet "${svc}"; then
+        restart_if_exists "${svc}" || true
+        return 0
+      fi
+    fi
+  done
+
+  if [[ -n "${first_existing}" ]]; then
+    restart_if_exists "${first_existing}" || true
+    return 0
+  fi
+
+  log "skip network restart; no configured network service units found"
+  return 1
+}
+
+read_fail_count() {
+  local current=0
+  if [[ -f "${FAIL_FILE}" ]]; then
+    current="$(cat "${FAIL_FILE}" 2>/dev/null || echo 0)"
+  fi
+  if [[ ! "${current}" =~ ^[0-9]+$ ]]; then
+    current=0
+  fi
+  printf '%s\n' "${current}"
+}
+
+write_fail_count() {
+  local value="$1"
+  mkdir -p "${STATE_DIR}"
+  printf '%s\n' "${value}" > "${FAIL_FILE}"
+}
+
+reset_fail_count() {
+  write_fail_count 0
+}
+
+do_health_check() {
+  local uptime_now
+  uptime_now="$(uptime_seconds)"
+  if [[ "${uptime_now}" -lt "${BOOT_GRACE_SECONDS}" ]]; then
+    log "boot grace active: uptime=${uptime_now}s < ${BOOT_GRACE_SECONDS}s; skipping heal cycle"
+    reset_fail_count
+    return 0
+  fi
+
+  local internet_ok=1
+  local tailscale_ok=1
+  local launcher_ok=1
+  local raspyjack_ok=1
+
+  if is_true "${CHECK_INTERNET}"; then
+    internet_ok=0
+    check_ping_online && internet_ok=1
+  fi
+  if is_true "${CHECK_TAILSCALE}"; then
+    tailscale_ok=0
+    check_tailscale_ok && tailscale_ok=1
+  fi
+  if is_true "${CHECK_LAUNCHER}"; then
+    launcher_ok=0
+    check_launcher_ok && launcher_ok=1
+  fi
+  if is_true "${CHECK_RASPYJACK}"; then
+    raspyjack_ok=0
+    check_raspyjack_ok && raspyjack_ok=1
+  fi
+
+  if [[ "${internet_ok}" -eq 1 && "${tailscale_ok}" -eq 1 && "${launcher_ok}" -eq 1 && "${raspyjack_ok}" -eq 1 ]]; then
+    log "healthy: internet=$(status_word "${CHECK_INTERNET}" "${internet_ok}") tailscale=$(status_word "${CHECK_TAILSCALE}" "${tailscale_ok}") launcher=$(status_word "${CHECK_LAUNCHER}" "${launcher_ok}") raspyjack=$(status_word "${CHECK_RASPYJACK}" "${raspyjack_ok}")"
+    reset_fail_count
+    return 0
+  fi
+
+  log "unhealthy: internet=$(status_word "${CHECK_INTERNET}" "${internet_ok}") tailscale=$(status_word "${CHECK_TAILSCALE}" "${tailscale_ok}") launcher=$(status_word "${CHECK_LAUNCHER}" "${launcher_ok}") raspyjack=$(status_word "${CHECK_RASPYJACK}" "${raspyjack_ok}")"
+
+  local has_non_internet_checks=0
+  if is_true "${CHECK_TAILSCALE}" || is_true "${CHECK_LAUNCHER}" || is_true "${CHECK_RASPYJACK}"; then
+    has_non_internet_checks=1
+  fi
+
+  local internet_only_down=0
+  if is_true "${CHECK_INTERNET}" && [[ "${internet_ok}" -eq 0 ]] && [[ "${tailscale_ok}" -eq 1 && "${launcher_ok}" -eq 1 && "${raspyjack_ok}" -eq 1 ]]; then
+    internet_only_down=1
+  fi
+
+  if [[ "${internet_only_down}" -eq 1 && "${has_non_internet_checks}" -eq 1 ]] && ! is_true "${TREAT_INTERNET_ONLY_DOWN_AS_FAILURE}"; then
+    log "degraded: ping targets unreachable but non-internet checks are healthy; skipping restart/reboot path"
+    reset_fail_count
+    return 0
+  fi
+
+  if is_true "${CHECK_INTERNET}" && [[ "${internet_ok}" -eq 0 ]]; then
+    restart_network_stack || true
+  fi
+
+  if is_true "${CHECK_TAILSCALE}" && [[ "${tailscale_ok}" -eq 0 ]]; then
+    restart_if_exists "${TAILSCALE_SERVICE}" || true
+  fi
+
+  if is_true "${CHECK_LAUNCHER}" && [[ "${launcher_ok}" -eq 0 ]]; then
+    restart_if_exists "${LAUNCHER_SERVICE}" || true
+  fi
+
+  if is_true "${CHECK_RASPYJACK}" && [[ "${raspyjack_ok}" -eq 0 ]]; then
+    local rj
+    for rj in ${RASPYJACK_SERVICES}; do
+      restart_if_exists "${rj}" || true
+    done
+  fi
+
+  sleep "${RECHECK_DELAY}"
+
+  internet_ok=1
+  tailscale_ok=1
+  launcher_ok=1
+  raspyjack_ok=1
+  if is_true "${CHECK_INTERNET}"; then
+    internet_ok=0
+    check_ping_online && internet_ok=1
+  fi
+  if is_true "${CHECK_TAILSCALE}"; then
+    tailscale_ok=0
+    check_tailscale_ok && tailscale_ok=1
+  fi
+  if is_true "${CHECK_LAUNCHER}"; then
+    launcher_ok=0
+    check_launcher_ok && launcher_ok=1
+  fi
+  if is_true "${CHECK_RASPYJACK}"; then
+    raspyjack_ok=0
+    check_raspyjack_ok && raspyjack_ok=1
+  fi
+
+  if [[ "${internet_ok}" -eq 1 && "${tailscale_ok}" -eq 1 && "${launcher_ok}" -eq 1 && "${raspyjack_ok}" -eq 1 ]]; then
+    log "self-heal successful after restart sequence"
+    reset_fail_count
+    return 0
+  fi
+
+  local failures
+  failures="$(read_fail_count)"
+  failures="$((failures + 1))"
+  write_fail_count "${failures}"
+  log "self-heal incomplete: consecutive_failures=${failures}/${MAX_FAILURES}"
+
+  if [[ "${failures}" -ge "${MAX_FAILURES}" ]]; then
+    if [[ "${REBOOT_ON_FAIL}" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss])$ ]]; then
+      log "reboot threshold reached; issuing reboot"
+      systemctl reboot
+      return 0
+    fi
+    log "reboot threshold reached but reboot disabled by KARI_WD_REBOOT_ON_FAIL=${REBOOT_ON_FAIL}"
+  fi
+
+  return 1
+}
+
+do_health_check

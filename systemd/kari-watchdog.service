@@ -1,0 +1,13 @@
+[Unit]
+Description=KARI Connectivity Watchdog
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory={{PROJECT_DIR}}
+EnvironmentFile=-/etc/default/kari-watchdog
+ExecStart={{PROJECT_DIR}}/bin/watchdog
+

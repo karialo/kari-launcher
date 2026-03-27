@@ -1,0 +1,6 @@
+displayhatmini
+RPi.GPIO>=0.7.1
+st7789
+#gpiozero
+Pillow
+pygame>=2.0.0
