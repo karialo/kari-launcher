@@ -1,65 +1,82 @@
 # K.A.R.I Launcher
 
-K.A.R.I Launcher is a field dashboard and control surface for a Raspberry Pi with a Waveshare 1.3in 240x240 display, joystick, and three front buttons. It provides a local device UI, a remote web mirror, service management, local node telemetry, and page-specific workflows for supported modules.
+K.A.R.I Launcher is a field dashboard and control surface for a Raspberry Pi with a Waveshare 1.3in 240x240 display, a joystick, and three front buttons. It gives you a local device UI, a remote web mirror, module-specific workflows, service control, and a cleaner way to keep a small operations box honest.
 
-This repository is for the launcher itself. It is not a toy UI sample. It is closer to a field dashboard with opinions, sharp edges, and a tendency to notice when the rest of your stack is lying to you. Treat it like an operational tool:
+This repository is the launcher, not a toy UI demo and not a generic kiosk sample. It sits in the middle of displays, services, radios, helper scripts, and whatever else you wire into it. Treat it like a real tool:
 
 - Use it only on hardware, services, and networks you own or are explicitly authorized to administer.
-- Read every command you wire into it before enabling remote control or unattended startup.
-- Assume any page that manipulates radios, services, or managed apps can interrupt connectivity.
-- Validate changes from a console or SSH session before relying on the physical display alone.
-- Do not expose the remote UI to untrusted networks without an auth token and a clear threat model.
+- Read every command, wrapper, and service name before enabling unattended startup or remote control.
+- Assume any page that manipulates radios, interfaces, or managed apps can interrupt connectivity.
+- Validate changes from SSH or a console before trusting the handheld UI alone.
+- Keep site-specific secrets, tokens, and credentials out of the repository.
 
-## Hardware
+The launcher is supposed to be useful, not mystical. When it behaves well, it should tell you what it is doing. When it behaves badly, it should at least fail loudly enough that you can go looking for the right thing.
+
+## Contents
+
+- [Hardware Target](#hardware-target)
+- [Current Page Set](#current-page-set)
+- [Repository Layout](#repository-layout)
+- [Controls](#controls)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Page Guide](#page-guide)
+- [Overview](#overview)
+- [GPS](#gps)
+- [Network-Ops](#network-ops)
+- [Lantern](#lantern)
+- [SocketWatch](#socketwatch)
+- [TrafficView](#trafficview)
+- [Kismet](#kismet)
+- [FoxHunt](#foxhunt)
+- [Wifite](#wifite)
+- [RaspyJack](#raspyjack)
+- [AngryOxide](#angryoxide)
+- [Remote Web UI](#remote-web-ui)
+- [Nodes and Status Boards](#nodes-and-status-boards)
+- [RaspyJack Patch Bundle](#raspyjack-patch-bundle)
+- [Watchdog](#watchdog)
+- [Troubleshooting](#troubleshooting)
+- [Operational Warnings](#operational-warnings)
+- [Service Removal](#service-removal)
+
+## Hardware Target
 
 Current hardware target:
 
-- Waveshare 1.3in LCD, 240x240
+- Waveshare 1.3in LCD
+- 240x240 resolution
 - 5-way joystick: `UP`, `DOWN`, `LEFT`, `RIGHT`, `OK`
-- Front buttons: `KEY1`, `KEY2`, `KEY3`
-- Optional PiSugar battery telemetry
+- front buttons: `KEY1`, `KEY2`, `KEY3`
+- optional PiSugar telemetry
 
-Default input pin mapping is defined in `src/launcher/dashboard.py`:
+Default input pin mapping lives in [dashboard.py](/home/kari/Projects/kari-launcher/src/launcher/dashboard.py).
 
-```json
-"input": {
-  "pins": {
-    "UP": 6,
-    "DOWN": 19,
-    "LEFT": 5,
-    "RIGHT": 26,
-    "OK": 13,
-    "KEY1": 21,
-    "KEY2": 20,
-    "KEY3": 16
-  }
-}
-```
+The old `A / B / X / Y` language belongs to the earlier DisplayHAT Mini era. The physical unit this launcher is built around is joystick plus three front keys. Some internal compatibility aliases still use older names, but the handheld control model is not that board anymore.
 
-The old `A / B / X / Y` wording no longer applies to the physical device. Those names still appear internally in the remote action layer as compatibility aliases for page navigation and context buttons. The hardware in your hand, however, is joystick + `KEY1`/`KEY2`/`KEY3`, not a tiny gamepad from a previous life.
+## Current Page Set
 
-## What It Does
+The launcher currently ships with these user-facing pages:
 
-The launcher currently provides these top-level pages:
-
-- `Overview`: local system summary, Tailscale IP, battery, CPU/RAM, GPS summary, node summary
-- `GPS`: lock, coordinates, altitude, speed, satellites, active device path
-- `Network Ops`: `wlan0` health, detected wireless adapters, service restarts, interface mode changes, launcher restart, device reboot/shutdown
-- `Lantern`: local subnet discovery and selected-host service inventory with a staged `Light the Way` workflow
-- `SocketWatch`: local listening sockets and connection summary
-- `TrafficView`: per-interface traffic counters and live-rate estimates
-- `Kismet`: passive capture/service status, source awareness, on-device device browsing, and FoxHunt handoff
-- `FoxHunt`: saved-session and live-target tracking workflow
+- `Overview`: local health, battery, CPU, RAM, Wi-Fi, Tailscale, node summary
+- `GPS`: lock, position, speed, altitude, satellites, active GPS device
+- `Network Ops`: interface state, service state, mode switching, recovery actions
+- `Lantern`: connected-LAN discovery and per-host service inventory
+- `SocketWatch`: local sockets and connection summary
+- `TrafficView`: per-interface traffic counters and rates
+- `Kismet`: passive capture status, source reporting, device browse, FoxHunt handoff
+- `FoxHunt`: target selection, target lock, hunt flow, session saves
 - `Wifite`: passive target staging plus a generic configurable command runner
-- `RaspyJack`: managed-app handoff page for starting/stopping the RaspyJack stack
-- `AngryOxide`: run status, log/summary view, interface selection, and workflow control
+- `RaspyJack`: launcher-managed handoff into a separate full-screen stack
+- `AngryOxide`: run status, logs, target selection, workflow control
 
-It also exposes:
+The launcher also provides:
 
 - a remote web UI on port `8787` by default
-- a framebuffer-backed virtual device preview
-- remote action logging
-- optional watchdog self-healing for launcher, Tailscale, internet reachability, and RaspyJack
+- a virtual device mirror backed by the real framebuffer
+- remote action handling
+- optional watchdog recovery
 
 ## Repository Layout
 
@@ -69,6 +86,9 @@ kari-launcher/
 │  ├─ dashboard
 │  ├─ launcher
 │  └─ watchdog
+├─ scripts/
+│  ├─ kismet-source-autoconfig.sh
+│  └─ kismet.service.override.conf
 ├─ src/launcher/
 │  ├─ dashboard.py
 │  ├─ foxhunt.py
@@ -82,38 +102,51 @@ kari-launcher/
 │  ├─ kari-watchdog.service
 │  ├─ kari-watchdog.timer
 │  └─ kari-watchdog.env
+├─ third_party/
+│  └─ raspyjack_patch/
 ├─ install_dashboard_service.sh
 ├─ uninstall_dashboard_service.sh
 ├─ install_watchdog_service.sh
 ├─ uninstall_watchdog_service.sh
+├─ start_raspyjack.sh
+├─ stop_raspyjack.sh
 ├─ requirements.txt
 └─ VERSION
 ```
 
+The main code paths you will actually edit most often are:
+
+- `src/launcher/dashboard.py`
+- `src/launcher/lantern.py`
+- `src/launcher/foxhunt.py`
+- `src/launcher/wifite_prep.py`
+- `src/launcher/angryoxide_menu.py`
+- `src/launcher/ops_pages.py`
+
 ## Controls
 
-General device control model:
+General control model:
 
-- `LEFT` / `RIGHT`: change page
-- `UP` / `DOWN`: scroll or move selection
-- `OK`: open a page menu, confirm a highlighted item, or refresh on simple pages
-- `KEY1`: primary page action in some contexts
-- `KEY2`: alternate page action in some contexts
-- `KEY3`: home/page-exit behavior where supported
+- `LEFT` / `RIGHT`: page change, unless the current page is intentionally trapping local navigation
+- `UP` / `DOWN`: scroll, move selection, or move between records
+- `OK`: open a page menu or confirm the highlighted item
+- `KEY1`: page-specific action in some flows
+- `KEY2`: alternate action, often refresh
+- `KEY3`: home/escape behavior where supported
 
 Footer hints on the physical display are the source of truth for the current page state.
 
 Common patterns:
 
-- `Overview`: `OK` refresh, `LEFT/RIGHT` change page
+- `Overview`: `OK` refresh
 - `GPS`: `UP/DOWN` scroll, `OK` refresh
-- `Network Ops`: `UP/DOWN` scroll, `OK` open menu, `KEY2` refresh
-- `Lantern`: `OK` opens the idle menu, `Light the Way` performs host + service discovery, then `UP/DOWN` pages through one host at a time
-- `SocketWatch`: `UP/DOWN` move through sockets, `OK` open menu, `KEY2` refresh
-- `TrafficView`: `UP/DOWN` move through interfaces, `OK` open menu, `KEY2` refresh
-- `Kismet`: `OK` opens the menu, `Browse Devices` splits into `Wireless` / `Bluetooth`, `UP/DOWN` navigates the active chooser, and `Recover Link` stops Kismet and restarts `NetworkManager` if the primary link gets knocked out
-- `FoxHunt`, `Wifite`, `AngryOxide`: menu-driven pages with scan lists and context-specific footer hints
-- `RaspyJack`: action-row page with launch/stop controls
+- `Network Ops`: `UP/DOWN` scroll, `OK` menu, `KEY2` refresh
+- `Lantern`: idle menu with `Light the Way`, then `UP/DOWN` pages through discovered hosts
+- `SocketWatch`: `UP/DOWN` through socket rows, `OK` menu
+- `TrafficView`: `UP/DOWN` through interface rows, `OK` menu
+- `Kismet`: `OK` menu, `Browse Devices` splits to `Wireless` or `Bluetooth`, `UP/DOWN` navigates the active picker
+- `FoxHunt`, `Wifite`, `AngryOxide`: menu-driven pages with mode-specific footer hints
+- `RaspyJack`: handoff and return controls
 
 ## Installation
 
@@ -125,9 +158,7 @@ git clone <your-repo-url> kari-launcher
 cd ~/Projects/kari-launcher
 ```
 
-### 2. Create a Python environment
-
-The launcher wrapper will try to create and use `.venv` automatically, but for first-time setup it is better to do it explicitly:
+### 2. Create the virtual environment
 
 ```bash
 python3 -m venv .venv
@@ -135,42 +166,44 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
+The launcher wrapper will try to help itself, but first-time setup is cleaner if you do this explicitly instead of hoping it reads your mind.
+
 ### 3. Run the dashboard once
 
 ```bash
 ./bin/dashboard
 ```
 
-On first run the launcher writes:
+On first run it will write:
 
 ```text
 ~/.config/launcher/dashboard.json
 ```
 
-Edit that file before enabling the service.
+That file becomes your live local truth. Edit it before enabling the service.
 
 ### 4. Enable local buttons
 
-Physical controls are disabled by default in the config:
+Physical controls are disabled by default:
 
 ```json
 "local_buttons_enabled": false
 ```
 
-For an actual handheld build, set it to:
+For a real handheld build:
 
 ```json
 "local_buttons_enabled": true
 ```
 
-### 5. Install the systemd service
+### 5. Install the launcher service
 
 ```bash
 cd ~/Projects/kari-launcher
 sudo ./install_dashboard_service.sh
 ```
 
-Useful service commands:
+Useful commands:
 
 ```bash
 sudo systemctl status kari-dashboard.service
@@ -178,29 +211,30 @@ sudo journalctl -u kari-dashboard.service -f
 sudo systemctl restart kari-dashboard.service
 ```
 
-## Quick Start Tutorial
+## Quick Start
 
-### Bring up the launcher on a new Pi
+### First boot on a new Pi
 
-1. Connect the display and confirm SPI/GPIO are enabled.
-2. Clone the repo and install requirements.
-3. Run `./bin/dashboard` once to generate `~/.config/launcher/dashboard.json`.
-4. Set `"local_buttons_enabled": true`.
-5. Review `hardware`, `input`, `network_ops`, and `remote` sections in the config.
-6. Restart the launcher and confirm the screen renders.
-7. Open `http://<pi-ip>:8787` from another device and verify the remote UI mirrors the physical display.
+1. Confirm SPI and GPIO are enabled.
+2. Clone the repo and install dependencies.
+3. Run `./bin/dashboard` once.
+4. Enable local buttons in `~/.config/launcher/dashboard.json`.
+5. Review `hardware`, `input`, `network_ops`, `remote`, and any module-specific config you care about.
+6. Start the launcher again and confirm the 240x240 screen is upright and readable.
+7. Open `http://<pi-ip>:8787` and confirm the web mirror matches the device.
 8. Only after that, install the systemd service.
 
-### First operational checks
+### First sanity checks
 
 After boot:
 
-- `Overview` should show hostname, Tailscale IP, battery, CPU, RAM, and GPS summary.
-- `Network Ops` should show `wlan0` plus any attached external radios.
-- `Lantern` should at least show the local `wlan0` IP and gateway even before you run `Light the Way`.
-- The web UI should load without depending on the physical display.
+- `Overview` should show hostname, Tailscale IP, battery, CPU, RAM, and local Wi-Fi state
+- `Network Ops` should show `wlan0` and any attached external radios
+- `Lantern` should show at least the local IP and gateway before you run discovery
+- `Kismet` should report its active source policy clearly if you have it installed
+- the web UI should load without depending on the physical screen
 
-If any of those fail, fix them before enabling watchdog or remote control. Future-you will appreciate the restraint.
+If those basics are broken, fix them first. Fancy workflows built on top of bad footing just give you faster confusion.
 
 ## Configuration
 
@@ -212,29 +246,37 @@ Main config path:
 
 Important top-level keys:
 
-- `refresh_seconds`: full snapshot refresh cadence
-- `idle_redraw_seconds`: redraw cadence when nothing changes
-- `history_points`: web history graph depth
-- `local_buttons_enabled`: enables joystick/front buttons
-- `backlight_level`: display backlight level
-- `backlight_pwm`: PWM backlight mode toggle
-- `request_timeout_seconds`: network probe timeout
-- `smb_deep_stats_enabled`: enable recursive SMB stats
-- `smb_detail_refresh_seconds`: SMB deep-stat cache interval
-- `hardware`: display backend, rotation, SPI, and pin settings
-- `input`: joystick/button pin mapping and debounce
-- `managed_apps`: managed fullscreen or handoff-style apps
-- `nodes`: remote systems shown in overview and node summaries
-- `raspyjack`, `angryoxide`, `foxhunt`, `wifite`, `lantern`, `network_ops`, `remote`: page-specific settings
+- `refresh_seconds`
+- `idle_redraw_seconds`
+- `history_points`
+- `local_buttons_enabled`
+- `backlight_level`
+- `backlight_pwm`
+- `request_timeout_seconds`
+- `smb_deep_stats_enabled`
+- `smb_detail_refresh_seconds`
+- `hardware`
+- `input`
+- `managed_apps`
+- `nodes`
+- `raspyjack`
+- `angryoxide`
+- `foxhunt`
+- `wifite`
+- `lantern`
+- `network_ops`
+- `kismet`
+- `remote`
 
-Practical note before you get too comfortable:
+Practical reality:
 
 - this project does not auto-detect your install layout
-- it does not auto-discover third-party tool paths
-- it does not auto-map service names for you
-- it does not know where your helper scripts live
+- it does not auto-discover your helper scripts
+- it does not guess your service names
+- it does not know which interfaces you consider sacred
+- it does not know where your third-party tools live
 
-Most users will need to change paths, service names, hostnames, interfaces, and command strings to fit their own box.
+You will almost certainly need to change paths, service names, interfaces, hostnames, and command strings to fit your own device.
 
 ### Minimal example config
 
@@ -263,234 +305,311 @@ Most users will need to change paths, service names, hostnames, interfaces, and 
 }
 ```
 
-## Node Statuses
-
-`Bjorn` and `PiTemplar` are not built-in products. They are just example node definitions in the default config. New users should replace them with their own systems and pretend those names were never there.
-
-The launcher’s node model is simple:
-
-- `host`: the main target hostname or IP
-- `ports`: optional TCP ports to probe
-- `health_url`: optional HTTP endpoint to fetch
-- `health_json_path`: optional dot-path into a JSON response
-- `health_expect`: optional text that must appear in the endpoint result
-- `smb`: optional SMB share probe block
-
-Node status is derived like this:
-
-- `online`: the node is reachable and its health/SMB checks do not report failure
-- `degraded`: the host is reachable but a health or SMB check failed
-- `offline`: no successful reachability signal was found
-
-### Example: simple node check
-
-```json
-"nodes": [
-  {
-    "name": "SensorPi",
-    "host": "sensorpi.tailnet.ts.net",
-    "ports": [22, 8080],
-    "health_url": "http://sensorpi.tailnet.ts.net:8080/health",
-    "health_json_path": "status",
-    "health_expect": "ok"
-  }
-]
-```
-
-### Example: SMB-enabled node
-
-```json
-"nodes": [
-  {
-    "name": "FilesPi",
-    "host": "filespi.tailnet.ts.net",
-    "ports": [22, 445],
-    "health_url": "",
-    "health_json_path": "",
-    "health_expect": "",
-    "smb": {
-      "host": "filespi.tailnet.ts.net",
-      "share": "private",
-      "username": "filespi",
-      "password": ""
-    }
-  }
-]
-```
-
-### How to add your own nodes
-
-1. Open `~/.config/launcher/dashboard.json`.
-2. Replace the sample `nodes` list with your own systems.
-3. Start with only `name`, `host`, and a small `ports` list.
-4. Add `health_url` only after you have confirmed the endpoint manually with `curl`.
-5. Add `health_json_path` if the endpoint returns JSON and you only care about one field.
-6. Add `health_expect` if you want the launcher to treat anything else as degraded.
-7. Add the optional `smb` block only if you need SMB visibility and understand the credential risk.
-8. Restart the launcher and watch `Overview` and the web node summary.
-
-### Health endpoint examples
-
-Plain text endpoint:
-
-```json
-{
-  "name": "EdgeNode",
-  "host": "edge.tailnet.ts.net",
-  "ports": [22, 9000],
-  "health_url": "http://edge.tailnet.ts.net:9000/health",
-  "health_expect": "ok"
-}
-```
-
-JSON endpoint:
-
-```json
-{
-  "name": "LabNode",
-  "host": "labnode.tailnet.ts.net",
-  "ports": [22, 5000],
-  "health_url": "http://labnode.tailnet.ts.net:5000/api/status",
-  "health_json_path": "service.state",
-  "health_expect": "ready"
-}
-```
-
-Warnings for node setup:
-
-- Do not put production passwords into a public repo.
-- Prefer hostnames or fixed Tailscale addresses over changing DHCP addresses.
-- Test every `health_url` manually before assuming launcher status is meaningful.
-- Do not enable deep SMB stats casually on slow storage or weak Pi hardware.
-- Treat SMB credentials in `dashboard.json` as sensitive local secrets.
-
 ## Page Guide
 
-### Overview
+This section is the real operator manual. Every current module gets its own section and its own short walkthrough.
 
-Shows:
+## Overview
 
-- Tailscale IPv4
+What it shows:
+
 - battery percentage
-- CPU temperature and usage
+- CPU temperature
+- CPU usage
 - RAM usage
-- GPS fix summary
-- node summary counts
+- local Wi-Fi state
+- hostname
+- Tailscale IP
+- node summary
 
-Best use:
+What it is for:
 
-- quick boot sanity check
-- confirming the device is alive before launching anything heavier
+- quick health check
+- "is this box alive and connected?"
+- spotting low battery or thermal drift before you start other work
 
-### GPS
+Tutorial:
 
-Shows:
+1. Open `Overview`.
+2. Confirm battery, CPU temp, CPU usage, and RAM all look sane.
+3. Confirm `wlan0` is present and Tailscale IP is populated if you expect remote access.
+4. Check the node summary cards.
+5. If something is missing here, do not trust the more complicated pages yet.
 
-- fix label
+Notes:
+
+- `Overview` is meant to be glanceable, not encyclopedic.
+- Local `wlan0` IP is shown on the device summary line as `W0 ...`.
+
+## GPS
+
+What it shows:
+
+- GPS mode / fix state
 - coordinates
-- satellite counts
 - altitude
 - speed
-- GPS device path
+- satellite count
+- active GPS device path
 
-Best use:
+What it is for:
 
-- checking receiver health
-- confirming gpsd is actually providing data
+- confirming receiver health
+- checking that gpsd is actually providing useful data
 
-### Network Ops
+Tutorial:
 
-Shows:
+1. Open `GPS`.
+2. Press `OK` or `KEY2` to refresh if the page looks stale.
+3. Check mode first, then satellite count, then coordinates.
+4. If you have no fix, confirm the GPS device path is populated before blaming the sky.
 
-- `wlan0` state, IP, and active NetworkManager profile
-- default route
-- NetworkManager and Tailscale service states
-- external wireless adapter inventory
+Warnings:
 
-Menu actions:
+- `GPS offline` can mean receiver issue, cable issue, or gpsd issue. It is not automatically the launcher's fault, tempting though that accusation may be.
+
+## Network Ops
+
+What it shows:
+
+- primary interface state
+- monitor interface state
+- route and active Wi-Fi profile
+- NetworkManager and Tailscale service state
+- detected external adapters
+
+Actions:
 
 - refresh
 - reconnect `wlan0`
-- reset `wlan1`
 - restart launcher
 - restart NetworkManager
 - restart Tailscale
-- change interface modes on external radios
-- shutdown or reboot the device
+- shutdown / reboot
+- per-adapter mode control for external radios
+
+Tutorial:
+
+1. Open `Network Ops`.
+2. Confirm `wlan0` is up and on the expected profile.
+3. Confirm your external radios appear with useful labels.
+4. If networking is confused, try `Reconnect wlan0` before the heavier options.
+5. Use adapter mode control only on external radios, not your management link.
 
 Warnings:
 
-- mode changes and resets can interrupt active workflows
-- restarting networking can drop your SSH session
-- restarting the launcher from the launcher is expected behavior now, but still interrupts the UI briefly
+- restarting networking can drop SSH
+- changing interface modes can break active capture workflows
+- restarting the launcher from the launcher is expected and briefly interrupts the UI
 
-### Lantern
+## Lantern
 
-Connected-LAN discovery and selected-host service inventory page.
+What it is:
 
-Shows:
+`Lantern` is the connected-LAN discovery page. It is the page you use when K.A.R.I is already on a network and you want to know who is around, what looks alive, and which open services the currently selected host is exposing.
 
-- idle summary with local interface, local IP, and gateway
-- staged host-and-service discovery via `Light the Way`
-- one selected host per on-device page once discovery completes
-- best-effort hostnames and vendor labels
-- wrapped open-port summary for the selected host
+Current workflow:
 
-Menu actions:
+- idle mode shows local interface, local IP, and gateway
+- `Light the Way` performs host discovery and selected-host service scans
+- detail mode shows one host per device page
 
-- `Light the Way` from idle
-- `Refresh` from detail view
-- `Exit` from detail view
+What it shows in detail mode:
 
-Use it for:
+- IP
+- best available name or identifier
+- MAC
+- state / vendor
+- wrapped open-port summary
 
-- confirming who is present on the local subnet
-- quickly checking one host's open services without leaving the launcher
+Tutorial:
 
-### FoxHunt
-
-Target-tracking page with scan, lock, and hunt states. It keeps saved sessions under:
-
-```text
-~/.local/share/launcher/foxhunt
-```
-
-Best use:
-
-- lock onto one target
-- watch RSSI trend over time
-- mark points and save a session
+1. Confirm `wlan0` is connected.
+2. Open `Lantern`.
+3. Make sure the idle page shows the local IP and gateway.
+4. Open the menu and choose `Light the Way`.
+5. Wait for discovery and service probing to finish.
+6. Use `UP/DOWN` to move host-by-host.
+7. Use `LEFT` to return to the idle page.
+8. Open the menu from detail mode if you want `Refresh` or `Exit`.
 
 Warnings:
 
-- it depends on the external radio selection being correct
-- scanning and tracking workflows can temporarily reconfigure an external adapter
+- the progress bar is real, not decorative
+- the page is intentionally slower than a simple ARP view because it also gathers service data
+- name resolution is best-effort; some devices will still look anonymous without richer local discovery sources
 
-### Wifite
+## SocketWatch
 
-Current implementation in this launcher is a passive prep and generic command-runner page.
+What it shows:
 
-What it does today:
+- local listening sockets
+- connection counts
+- protocol / port summary
 
-- scan nearby APs
-- stage a target SSID/BSSID/channel/security tuple
-- select the external interface used for passive scans
-- run a configured command via `wifite.run_command`
-- capture and display stdout/stderr in the lower panel and web UI
+What it is for:
 
-What it does not guarantee:
+- checking what this Pi is listening on
+- spotting whether a local service is actually bound
 
-- that your configured command is safe
-- that the command is lightweight enough not to impact the launcher
-- that the command supports non-interactive execution
+Tutorial:
+
+1. Open `SocketWatch`.
+2. Scroll through the socket rows.
+3. Confirm expected services are listening.
+4. If something that should be local is missing, check `systemctl` and `journalctl` next.
 
 Warnings:
 
-- anything you place in `run_command` is your responsibility
-- long-running or noisy commands can degrade launcher responsiveness
-- do not commit live command strings or secrets into a public repo
+- this is local-socket visibility, not a remote host scanner
 
-Example placeholder:
+## TrafficView
+
+What it shows:
+
+- per-interface RX/TX counters
+- rough live rate estimates
+
+What it is for:
+
+- checking whether an interface is active at all
+- spotting whether one interface is carrying all the traffic while another is idle
+
+Tutorial:
+
+1. Open `TrafficView`.
+2. Move through interfaces with `UP/DOWN`.
+3. Watch counters over a few refreshes.
+4. Compare what you expect to what is actually moving traffic.
+
+Warnings:
+
+- it is a throughput glance page, not a full traffic analysis tool
+
+## Kismet
+
+What it is:
+
+`Kismet` is the passive capture status page. It is the launcher-side control and summary view for a running Kismet stack, with enough local controls to survive the awkward moment where the remote browser becomes less useful than the device in your hand.
+
+What it shows:
+
+- service state
+- web state
+- active Wi-Fi source
+- active Bluetooth source
+- Wi-Fi AP / device counts
+- Bluetooth device count
+- selected device summary
+- recent source / warning / log lines
+
+What it can do:
+
+- refresh Kismet status
+- start, stop, or restart the Kismet service
+- recover the management link by stopping Kismet and restarting NetworkManager
+- browse detected devices on the 240x240 screen
+- hand a selected Wi-Fi target into `FoxHunt`
+
+### Kismet source policy on this build
+
+This is important, because confusion here is expensive:
+
+- `wlan0` is the management link and should stay out of Kismet
+- if `wlan2` exists, Kismet auto-prefers `wlan2` at service start
+- if `wlan2` does not exist, the launcher does not silently volunteer `wlan1`
+- Bluetooth is auto-added only when `hci0` exists at service start
+
+That behavior is implemented by:
+
+- [kismet-source-autoconfig.sh](/home/kari/Projects/kari-launcher/scripts/kismet-source-autoconfig.sh)
+- [kismet.service.override.conf](/home/kari/Projects/kari-launcher/scripts/kismet.service.override.conf)
+
+Tutorial:
+
+1. Install Kismet separately first.
+2. Open `Kismet`.
+3. Check the active Wi-Fi source and Bluetooth source lines.
+4. Confirm `wlan0` is not being used as a Kismet source.
+5. Use `Browse Devices` and choose `Wireless` or `Bluetooth`.
+6. Move through devices with `UP/DOWN`.
+7. Press `OK` to select one.
+8. If the selected device is Wi-Fi and appropriate for `FoxHunt`, open the menu and use `Hunt`.
+
+Warnings:
+
+- if you force Kismet onto `wlan0`, you should expect to lose your management link
+- source policy depends on what exists at service start, especially Bluetooth
+- Kismet can coexist with admin/passive pages, but it still competes with other workflows that want to own the same capture radio
+
+## FoxHunt
+
+What it is:
+
+`FoxHunt` is the target lock and hunt page. It is meant for the off-network, radio-facing workflow where you care about selecting a target and tracking it over time, not doing connected-LAN service inventory.
+
+What it shows:
+
+- scan mode and selected interface
+- target SSID / BSSID
+- RSSI and trend state
+- GPS sample state
+- recent visible target list
+
+Tutorial:
+
+1. Open `FoxHunt`.
+2. Start a scan.
+3. Choose a target from the discovered wireless list.
+4. Lock the target.
+5. Start the hunt.
+6. Watch RSSI trend and proximity state change as you move.
+7. Save the session if you want a record.
+
+Warnings:
+
+- this page expects the external radio flow to be sane
+- it is not the place for connected-LAN port scanning
+- if Kismet is already using the same capture radio, expect contention unless you have separated radio ownership cleanly
+
+## Wifite
+
+What it is:
+
+In this launcher, `Wifite` is a passive target staging page plus a generic command runner. The launcher-side page is intentionally limited to prep, selection, and command execution plumbing.
+
+What it does:
+
+- scans nearby APs
+- stages target SSID / BSSID / channel / security
+- lets you pick the external interface used for passive scans
+- runs `wifite.run_command`
+- captures stdout/stderr into the page and web UI
+
+Environment exported to the configured command:
+
+- `WIFITE_TARGET_SSID`
+- `WIFITE_TARGET_BSSID`
+- `WIFITE_TARGET_CHANNEL`
+- `WIFITE_TARGET_SECURITY`
+
+Tutorial:
+
+1. Open `Wifite`.
+2. Select a network.
+3. Set the target.
+4. Confirm the staged target fields look correct.
+5. Trigger `Run`.
+6. Watch the output panel for stdout/stderr from your configured command.
+
+Warnings:
+
+- the launcher does not guarantee your configured command is safe
+- noisy commands can still affect responsiveness
+- some terminal-hungry tools expect a TTY and will fail in a detached command-runner model
+- do not commit secrets or live operational command strings to a public repo
+
+Example:
 
 ```json
 "wifite": {
@@ -501,161 +620,64 @@ Example placeholder:
 }
 ```
 
-The runner exports:
+## RaspyJack
 
-- `WIFITE_TARGET_SSID`
-- `WIFITE_TARGET_BSSID`
-- `WIFITE_TARGET_CHANNEL`
-- `WIFITE_TARGET_SECURITY`
+What it is:
 
-so local wrapper commands can consume the selected target context.
+`RaspyJack` is a managed handoff page. The launcher owns the screen by default, and this page hands the display and input stack off to RaspyJack through wrapper scripts.
 
-### RaspyJack
+What it expects:
 
-Managed-app page for handing the display over to RaspyJack through external wrapper scripts.
+- RaspyJack is already installed separately
+- RaspyJack does not auto-own the screen at boot
+- launcher wrappers control the start / stop handoff
 
 Defaults:
 
-- start: `/home/<user>/Projects/kari-launcher/start_raspyjack.sh`
-- stop: `/home/<user>/Projects/kari-launcher/stop_raspyjack.sh`
+- [start_raspyjack.sh](/home/kari/Projects/kari-launcher/start_raspyjack.sh)
+- [stop_raspyjack.sh](/home/kari/Projects/kari-launcher/stop_raspyjack.sh)
 
-Use it for:
+Tutorial:
 
-- clean launcher-to-RaspyJack handoff
-- stopping RaspyJack and returning to the launcher
-
-### RaspyJack Setup Notes
-
-The launcher assumes RaspyJack is already installed separately. The launcher does not install RaspyJack for you, and it does not want RaspyJack permanently owning the display or grabbing input at boot.
-
-The intended model is:
-
-- launcher starts on boot
-- launcher owns the screen and controls by default
-- RaspyJack is launched on demand from the `RaspyJack` page
-- wrapper scripts handle the handoff
-- when RaspyJack exits, the launcher comes back
-
-In practice that means new users should:
-
-1. Install RaspyJack manually first.
-2. Make sure it can run successfully on its own before integrating it with K.A.R.I.
-3. Disable or avoid any RaspyJack service that would auto-start it at boot.
-4. Provide launcher-controlled wrapper scripts for start and stop.
-
-This repository includes example launcher-side wrappers:
-
-- `start_raspyjack.sh`
-- `stop_raspyjack.sh`
-
-They are examples, not sacred texts. Expect to edit them.
-
-Why this matters:
-
-- if RaspyJack starts itself as a service, it will fight the launcher for display ownership
-- if both stacks think they own GPIO/input, you get ghost presses, missing input, or a dead screen
-- if both stacks think they own the framebuffer, you get chaos with extra confidence
-
-### Example RaspyJack Handoff Model
-
-Your local wrapper scripts should be the traffic cops.
-
-Typical start wrapper responsibilities:
-
-- stop `kari-dashboard.service`
-- prepare any RaspyJack-specific environment
-- launch RaspyJack
-
-Typical stop wrapper responsibilities:
-
-- stop RaspyJack services/processes
-- restart `kari-dashboard.service`
-
-The launcher points to those wrappers here:
-
-```json
-"managed_apps": {
-  "raspyjack": {
-    "label": "RaspyJack",
-    "start_cmd": "/home/<user>/Projects/kari-launcher/start_raspyjack.sh",
-    "stop_cmd": "/home/<user>/Projects/kari-launcher/stop_raspyjack.sh",
-    "status_cmd": "systemctl is-active raspyjack.service raspyjack-device.service raspyjack-webui.service",
-    "takes_over_display": true
-  }
-}
-```
-
-If you keep the wrappers stable, the launcher integration stays simple.
-
-This repository also includes a small audited patch bundle at:
-
-- `third_party/raspyjack_patch/`
-
-That bundle contains only the files we could justify as part of the 1.3in/ST7789 display port after comparing a fresh RaspyJack clone with the modified snapshot, plus one optional `Return to Launcher` menu hook. It is intentionally narrower than “everything that ever changed”.
-
-### Making RaspyJack Work on the Waveshare 1.3in Display
-
-Out of the box, RaspyJack is aimed at a 1.44in display layout. K.A.R.I is not. If you want the handoff to feel clean, RaspyJack needs to be taught the new screen geometry.
-
-What needs to change on the RaspyJack side:
-
-- display driver selection
-- width and height assumptions
-- rotation/invert settings
-- font sizing
-- menu spacing
-- any hard-coded coordinates copied from the 1.44in layout
-
-The target you want RaspyJack to match is:
-
-- Waveshare 1.3in LCD
-- `240x240`
-
-When adapting RaspyJack, look for:
-
-- files like `LCD_1in44.py`
-- any display abstraction layer that hard-codes `1.44`
-- render code that assumes the old resolution
-- fixed pixel offsets for headers, menus, and icons
-
-The fix is not magic. It is mostly boring, honest UI plumbing:
-
-- swap the driver/config to the 1.3in model
-- set the correct resolution
-- update rotation so the screen is upright in your case
-- reflow menu rows so they fit a square `240x240` layout
-- check that button prompts and status text do not clip
-
-The easiest validation loop:
-
-1. Run RaspyJack directly outside the launcher.
-2. Verify the screen is upright.
-3. Verify text is not clipped.
-4. Verify menus fit.
-5. Verify the device returns cleanly to the launcher when stopped.
+1. Get RaspyJack working correctly by itself first.
+2. Disable any RaspyJack service that would auto-start and grab the display.
+3. Adapt the wrapper scripts for your own paths and service names.
+4. Point `managed_apps.raspyjack` at those wrappers.
+5. Test start and stop from the launcher.
 
 Warnings:
 
-- do not try to debug launcher handoff and RaspyJack display porting at the same time if you can avoid it
-- first make RaspyJack render correctly by itself
+- do not debug display porting and launcher handoff at the same time if you can avoid it
+- first make RaspyJack render correctly on your hardware
 - then wire in the launcher handoff
-- then test start/stop behavior from the `RaspyJack` page
 
-### AngryOxide
+## AngryOxide
 
-Managed workflow page with:
+What it is:
 
-- run status
-- summary view
-- log view
-- interface selection
-- profile-based launch control
+`AngryOxide` is the launcher page for a separate managed workflow. It exposes run state, logs, target selection, and controls through the same device/web surface as the rest of the launcher.
+
+What it shows:
+
+- process status
+- target context
+- result counters
+- recent log output
+
+Tutorial:
+
+1. Open `AngryOxide`.
+2. Refresh the page and confirm the selected interface is what you expect.
+3. Select a target if the workflow requires one.
+4. Start the run.
+5. Watch the status and log sections.
+6. Stop the run cleanly before changing interface state elsewhere.
 
 Warnings:
 
-- this page is for operator-owned environments only
-- do not assume the defaults are appropriate for your hardware or legal environment
-- treat external command wiring as a deliberate administrative action
+- this page controls an external workflow, not a toy simulator
+- radio ownership still matters
+- if the chosen adapter drifts out of the expected mode, use `Network Ops` to repair it before assuming the module is haunted
 
 ## Remote Web UI
 
@@ -665,13 +687,13 @@ Default URL:
 http://<pi-ip>:8787
 ```
 
-Provides:
+It provides:
 
 - page navigation
-- action buttons per page
+- page-specific action buttons
 - launcher status panel
 - framebuffer mirror
-- remote device controls
+- remote directional controls
 
 Important endpoints:
 
@@ -699,12 +721,51 @@ Optional token:
 }
 ```
 
-Remote safety notes:
+Warnings:
 
-- set a token before exposing the UI beyond a trusted LAN
-- `safe_mode` reduces what remote callers can trigger
-- high-impact actions require confirmation logic
-- all remote actions are logged to `/tmp/portableops-remote-actions.log`
+- set a token before exposing the UI anywhere you do not completely trust
+- `safe_mode` exists for a reason
+- remote actions are logged
+
+## Nodes and Status Boards
+
+`Bjorn` and `PiTemplar` in the screenshots and default examples are just local examples from this build. They are not magical built-ins and they are not required.
+
+New users should replace them with their own systems in the `nodes` config.
+
+Typical node data you can define:
+
+- name
+- host or IP
+- ports to probe
+- optional HTTP health endpoint
+- optional SMB probe settings
+
+Tutorial:
+
+1. Pick one host you own.
+2. Add a minimal node entry with `name`, `host`, and one port.
+3. restart the launcher
+4. confirm the node appears in `Overview`
+5. add HTTP or SMB checks only after the basic probe works
+
+The launcher is much happier when you teach it your world instead of making it pretend it already knows it.
+
+## RaspyJack Patch Bundle
+
+The small RaspyJack patch bundle in:
+
+- [third_party/raspyjack_patch](/home/kari/Projects/kari-launcher/third_party/raspyjack_patch)
+
+contains only the changes we could defend publicly as part of the 1.3in/ST7789 adaptation plus the optional `Return to Launcher` hook.
+
+It does not claim to be the whole of RaspyJack, and it should not be read that way.
+
+Use it when:
+
+- you need the 1.3in display port
+- you need the launcher return hook
+- you want a narrower public patch set instead of a giant hand-wavy fork
 
 ## Watchdog
 
@@ -722,61 +783,16 @@ cd ~/Projects/kari-launcher
 sudo ./install_watchdog_service.sh
 ```
 
-Default runtime config lives at:
+Runtime config usually lives at:
 
 ```text
 /etc/default/kari-watchdog
 ```
 
-Default behavior:
-
-- boot grace period before heal attempts
-- periodic checks via systemd timer
-- service restarts on failure
-- optional reboot after repeated failures
-
 Warnings:
 
-- do not enable aggressive reboot behavior until you trust your health checks
-- a bad watchdog config can turn transient failures into reboot loops
-
-## Tutorials
-
-### Tutorial: add your own node summary
-
-1. Pick one device you own.
-2. Add it to `nodes` with just `name`, `host`, and `ports`.
-3. Restart the launcher.
-4. Verify it appears in the web UI node summary.
-5. Add an HTTP health endpoint only after the basic host probe works.
-
-### Tutorial: bring up Lantern on a new network
-
-1. Confirm `wlan0` has an IP.
-2. Open `Lantern`.
-3. Confirm the idle page shows the local IP and gateway.
-4. Choose `Light the Way`.
-5. Wait for host discovery and selected-host service scans to complete.
-6. Use `UP/DOWN` to move device-by-device.
-7. If names are sparse, that is normal. The page uses local neighbor data, vendor hints, and lightweight service probing, not router-specific discovery magic.
-
-### Tutorial: enable safe remote access
-
-1. Set a non-empty `remote.token`.
-2. Temporarily set `"safe_mode": true`.
-3. Restart `kari-dashboard.service`.
-4. Confirm page navigation and refresh work remotely.
-5. Only then decide whether you want to permit more powerful remote actions.
-
-### Tutorial: install launcher and watchdog cleanly
-
-```bash
-cd ~/Projects/kari-launcher
-sudo ./install_dashboard_service.sh
-sudo ./install_watchdog_service.sh
-sudo systemctl status kari-dashboard.service
-sudo systemctl status kari-watchdog.timer
-```
+- a bad watchdog config can turn small failures into reboot theatre
+- do not enable aggressive reboot behavior until you trust your checks
 
 ## Troubleshooting
 
@@ -785,8 +801,8 @@ sudo systemctl status kari-watchdog.timer
 Check:
 
 - `"local_buttons_enabled": true`
-- correct pin mapping in `input.pins`
-- your display/input wiring matches the Waveshare board, not an older DisplayHAT Mini layout
+- the `input.pins` mapping
+- your wiring matches the Waveshare 1.3in board, not an older layout
 
 ### The web UI loads but actions do nothing
 
@@ -794,8 +810,8 @@ Check:
 
 - `remote.enabled`
 - `remote.port`
-- `remote.token` if one is required
-- the launcher log:
+- `remote.token` if required
+- launcher logs:
 
 ```bash
 sudo journalctl -u kari-dashboard.service -f
@@ -805,73 +821,55 @@ sudo journalctl -u kari-dashboard.service -f
 
 Check:
 
-- hostname or IP is correct
-- ports are actually open
-- the health endpoint responds locally with `curl`
-- SMB settings are correct and intentionally enabled
+- hostnames or IPs
+- ports
+- health endpoint response with `curl`
+- SMB settings if you enabled them
 
-### The launcher crashes or restarts repeatedly
+### The launcher restarts or crashes repeatedly
 
 Check:
 
 - `dashboard.json` is valid JSON
-- any configured shell command strings are quoted correctly
-- custom wrapper scripts exist and are executable
+- custom command strings are quoted correctly
+- wrapper scripts exist and are executable
 
-### A page becomes sluggish
+### Kismet shows Bluetooth as off
+
+Check:
+
+- `hci0` really exists before or during Kismet start
+- `/etc/kismet/kismet_site.conf`
+- `systemctl cat kismet.service`
+- the launcher Kismet page source lines
+
+Current expected behavior on this build:
+
+- `wlan2` is auto-preferred when present
+- `hci0` is auto-added when present
+- `wlan0` is left alone
+
+### A page feels sluggish
 
 Common causes:
 
 - heavy external commands
 - over-frequent scans
-- deep SMB stats on weak hardware
-- over-aggressive remote refresh usage
-
-### Kismet starts but grabs the wrong radio
-
-Current intended behavior on this build:
-
-- `wlan0` stays managed for connectivity
-- if `wlan2` exists, Kismet auto-prefers `wlan2` on service start
-- if `wlan2` does not exist, Wi-Fi capture remains manual instead of silently stealing `wlan1`
-
-Check:
-
-- `/etc/kismet/kismet_site.conf`
-- `systemctl cat kismet.service`
-- the `Kismet` launcher page, which now reports the active Wi-Fi and Bluetooth sources
-
-If Bluetooth is missing from the Kismet page, confirm `hci0` exists before Kismet starts.
+- deep SMB stats
+- over-aggressive remote polling
 
 ## Operational Warnings
 
 - This launcher can manage services, radios, and external workflows. Review every command path before enabling unattended use.
-- Keep secrets out of the repository. Store site-specific credentials only in the local config on the target device.
-- Never assume sample hostnames, interfaces, or commands fit your environment unchanged.
-- Validate every hardware pin mapping on the bench before field deployment.
-- If a page controls a managed app that takes over the display, make sure you have a reliable way back to the launcher.
+- Keep secrets and credentials out of the repository.
+- Do not assume example paths, service names, or interfaces match your environment.
+- Validate hardware pin mappings before field deployment.
+- If a page hands the display off to another stack, make sure you have a reliable way back.
 
-## Removing Services
+## Service Removal
 
 ```bash
 cd ~/Projects/kari-launcher
 sudo ./uninstall_watchdog_service.sh
 sudo ./uninstall_dashboard_service.sh
 ```
-
-## Current Defaults Worth Reviewing
-
-Before you call a setup complete, review these values in your local config:
-
-- `local_buttons_enabled`
-- `hardware.rotation`
-- `hardware.invert`
-- `network_ops.primary_iface`
-- `network_ops.monitor_iface`
-- `network_ops.wifi_profile`
-- `remote.token`
-- `remote.safe_mode`
-- `nodes`
-- any page-specific command strings
-
-If you are publishing this repository, publish code and defaults, not your live site config.
