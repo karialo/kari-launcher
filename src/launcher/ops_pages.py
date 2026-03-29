@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import json
+import re
 import shutil
 import socket
 import sqlite3
@@ -568,14 +569,22 @@ class KismetController:
         self.last_error = ""
         self.last_refresh_completed = 0.0
         self.last_refresh_duration_s = 0.0
+        self.action_thread: threading.Thread | None = None
+        self.action_label = ""
 
     def _set_status(self, text: str, hold: float = 4.0) -> None:
         self.status_cb(_clean(text, 72), hold)
+
+    def _action_busy(self) -> bool:
+        thread = self.action_thread
+        return thread is not None and thread.is_alive()
 
     def footer_text(self) -> str:
         with self.lock:
             if self.menu_open:
                 return "U/D menu  OK pick  L back"
+            if self._action_busy():
+                return "Working...  L back"
             if self.state == "browse_type":
                 return "U/D type  OK pick  L back"
             if self.state == "browse":
@@ -924,11 +933,36 @@ class KismetController:
         self._set_status("Link recovery complete", 5.0)
         return True
 
+    def _start_async_action(self, label: str, runner: Callable[[], bool]) -> bool:
+        with self.lock:
+            if self._action_busy():
+                self._set_status("Kismet action already running", 4.0)
+                return False
+            self.action_label = _clean(label, 32)
+
+            def _wrapped() -> None:
+                try:
+                    runner()
+                finally:
+                    with self.lock:
+                        self.action_label = ""
+                        self.action_thread = None
+                    self.redraw_cb()
+
+            worker = threading.Thread(target=_wrapped, daemon=True)
+            self.action_thread = worker
+        self.redraw_cb()
+        worker.start()
+        return True
+
     def tick(self, force: bool = False) -> None:
         with self.lock:
             stale = (time.monotonic() - self.last_refresh_completed) if self.last_refresh_completed else None
             menu_open = self.menu_open
+            busy = self._action_busy()
         if menu_open:
+            return
+        if busy:
             return
         if force or stale is None or stale >= self.refresh_interval:
             self.refresh()
@@ -973,6 +1007,8 @@ class KismetController:
                 self.redraw_cb()
                 self._set_status("Kismet device selected", 4.0)
                 return
+            if self._action_busy():
+                return
             if not self.menu_open:
                 self.menu_open = True
                 self.menu_index = 0
@@ -996,26 +1032,24 @@ class KismetController:
             self.redraw_cb()
             return
         if item == "Refresh Data":
-            self.refresh()
-            self._set_status("Kismet refreshed", 4.0)
+            self._start_async_action("refresh", lambda: (self.refresh(), self._set_status("Kismet refreshed", 4.0), True)[2])
             return
         if item == "Start Service":
-            self._service_action("start")
+            self._start_async_action("start", lambda: self._service_action("start"))
             return
         if item == "Stop Service":
-            self._service_action("stop")
+            self._start_async_action("stop", lambda: self._service_action("stop"))
             return
         if item == "Restart Service":
-            self._service_action("restart")
+            self._start_async_action("restart", lambda: self._service_action("restart"))
             return
         if item == "Recover Link":
-            self._recover_link()
+            self._start_async_action("recover", self._recover_link)
             return
         self.redraw_cb()
 
     def secondary(self) -> None:
-        self.refresh()
-        self._set_status("Kismet refreshed", 4.0)
+        self._start_async_action("refresh", lambda: (self.refresh(), self._set_status("Kismet refreshed", 4.0), True)[2])
 
     def back(self) -> bool:
         with self.lock:
@@ -1040,16 +1074,15 @@ class KismetController:
     def remote_action(self, action: str) -> bool:
         cmd = _clean(action, 32).lower()
         if cmd == "kismet_refresh":
-            self.secondary()
-            return True
+            return self._start_async_action("refresh", lambda: (self.refresh(), self._set_status("Kismet refreshed", 4.0), True)[2])
         if cmd == "kismet_start":
-            return self._service_action("start")
+            return self._start_async_action("start", lambda: self._service_action("start"))
         if cmd == "kismet_stop":
-            return self._service_action("stop")
+            return self._start_async_action("stop", lambda: self._service_action("stop"))
         if cmd == "kismet_restart":
-            return self._service_action("restart")
+            return self._start_async_action("restart", lambda: self._service_action("restart"))
         if cmd == "kismet_recover":
-            return self._recover_link()
+            return self._start_async_action("recover", self._recover_link)
         return False
 
     def render_view(self) -> OpsPageView:
@@ -1114,6 +1147,8 @@ class KismetController:
                 f"BT {self.bt_device_count}  FILES {self.capture_files}",
                 f"LAST {_fmt_age(None if not self.last_refresh_completed else max(0.0, time.monotonic() - self.last_refresh_completed))}",
             ]
+            if self._action_busy():
+                lines.append(f"WORK {self.action_label.upper() or 'BUSY'}")
             if self.selected_device:
                 dev = self.selected_device
                 lines.append("")
