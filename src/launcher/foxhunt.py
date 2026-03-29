@@ -154,6 +154,8 @@ class FoxhuntController:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.active_path = self.save_dir / "active_session.json"
         self.last_path = self.save_dir / "last_session.json"
+        self.primary_iface = _clean(cfg.get("primary_interface", "wlan0"), 24) or "wlan0"
+        self.top_ports = max(5, min(50, int(cfg.get("top_ports", 20) or 20)))
         self.status_cb = status_cb
         self.redraw_cb = redraw_cb
         self.iface_choices_cb = iface_choices_cb
@@ -194,7 +196,10 @@ class FoxhuntController:
         self.tool_sudo = self._resolve_tool("sudo", ["/usr/bin/sudo", "/bin/sudo"])
         self.tool_timeout = self._resolve_tool("timeout", ["/usr/bin/timeout", "/bin/timeout"])
         self.tool_airodump = self._resolve_tool("airodump-ng", ["/usr/sbin/airodump-ng", "/usr/bin/airodump-ng", "/bin/airodump-ng"])
+        self.tool_nmap = self._resolve_tool("nmap", ["/usr/bin/nmap"])
         self._resume_active_if_present()
+        self.service_target_ip = ""
+        self.service_lines: list[str] = []
 
     def _resolve_tool(self, name: str, fallbacks: list[str]) -> str:
         found = shutil.which(name)
@@ -761,6 +766,40 @@ class FoxhuntController:
         self._persist_active()
         self._set_status(f"FoxHunt locked {selected.ssid}", 4.0)
 
+    def set_external_target(self, ssid: str, bssid: str, channel: int | None, security: str = "unknown", rssi: int | None = None) -> bool:
+        safe_bssid = _clean(bssid, 32).lower()
+        if not safe_bssid:
+            return False
+        safe_ssid = _clean(ssid or "<hidden>", 64) or "<hidden>"
+        safe_security = _clean(security or "unknown", 24) or "unknown"
+        with self.lock:
+            self.selected_target = TargetInfo(
+                ssid=safe_ssid,
+                bssid=safe_bssid,
+                channel=channel,
+                security=safe_security,
+            )
+            self.state = "target"
+            self.menu_open = False
+            self.current_rssi = rssi
+            self.avg_short = float(rssi) if rssi is not None else None
+            self.avg_long = float(rssi) if rssi is not None else None
+            self.trend = "stable"
+            self.best_rssi = rssi
+            self.worst_rssi = rssi
+            self.best_sample = None
+            self.sample_history.clear()
+            self.session_samples.clear()
+            self.mark_count = 0
+            self.session_started_ts = time.time()
+            self.last_seen_ts = time.time()
+            self.target_visible = rssi is not None
+            self.status_label = "active"
+            self._persist_active()
+        self._set_status(f"FoxHunt locked {safe_ssid}", 4.0)
+        self.redraw_cb()
+        return True
+
     def _clear_target(self) -> None:
         self.selected_target = None
         self.current_rssi = None
@@ -777,6 +816,8 @@ class FoxhuntController:
         self.mark_count = 0
         self.session_started_ts = None
         self.session_saved_path = ""
+        self.service_target_ip = ""
+        self.service_lines = []
         self.status_label = "none"
         self.state = "idle"
         self.menu_open = False
@@ -808,8 +849,53 @@ class FoxhuntController:
         self.worst_rssi = payload.get("worst_rssi")
         self.session_saved_path = _clean(payload.get("saved_path", ""), 256)
         self.mark_count = int(payload.get("mark_count", 0) or 0)
+        self.service_target_ip = ""
+        self.service_lines = []
         self.status_label = "previous"
         self._set_status("FoxHunt session loaded", 4.0)
+
+    def _resolve_target_ip(self) -> str:
+        target = self.selected_target
+        if target is None:
+            return ""
+        try:
+            result = self._run_cmd([self.tool_ip, "-4", "neigh", "show", "dev", self.primary_iface], timeout=3.0, privileged=False)
+        except Exception:
+            return ""
+        for raw in (result.stdout or "").splitlines():
+            line = raw.strip()
+            low = line.lower()
+            if target.bssid.lower() not in low:
+                continue
+            parts = line.split()
+            if parts and parts[0].count(".") == 3:
+                return _clean(parts[0], 32)
+        return ""
+
+    def _service_scan(self) -> None:
+        target = self.selected_target
+        if target is None:
+            self._set_status("FoxHunt: no target", 4.0)
+            return
+        ip = self._resolve_target_ip()
+        if not ip:
+            with self.lock:
+                self.service_target_ip = ""
+                self.service_lines = []
+            self._set_status("FoxHunt: no LAN IP for target", 4.0)
+            self.redraw_cb()
+            return
+        out = self._run_cmd([self.tool_nmap, "-Pn", "--top-ports", str(self.top_ports), "--open", ip], timeout=18.0, privileged=False)
+        lines: list[str] = []
+        for raw in (out.stdout or "").splitlines():
+            line = raw.strip()
+            if "/tcp" in line or "/udp" in line:
+                lines.append(_clean(line, 80))
+        with self.lock:
+            self.service_target_ip = ip
+            self.service_lines = lines[:8]
+        self._set_status("FoxHunt service scan complete", 4.0 if lines else 5.0)
+        self.redraw_cb()
 
     def tick(self, gps: Any, force: bool = False) -> None:
         with self.lock:
@@ -1271,6 +1357,8 @@ class FoxhuntController:
                 "sample_count": len(self.session_samples),
                 "gps_valid_samples": gps_valid,
                 "mark_count": self.mark_count,
+                "service_target_ip": self.service_target_ip,
+                "service_lines": list(self.service_lines),
                 "last_error": self.last_error,
                 "last_gps": dict(self.last_gps),
                 "saved_path": self.session_saved_path,

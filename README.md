@@ -45,7 +45,10 @@ The launcher currently provides these top-level pages:
 - `Overview`: local system summary, Tailscale IP, battery, CPU/RAM, GPS summary, node summary
 - `GPS`: lock, coordinates, altitude, speed, satellites, active device path
 - `Network Ops`: `wlan0` health, detected wireless adapters, service restarts, interface mode changes, launcher restart, device reboot/shutdown
-- `Lantern`: local subnet discovery using neighbor cache with optional active enrichment
+- `Lantern`: local subnet discovery and selected-host service inventory with a staged `Light the Way` workflow
+- `SocketWatch`: local listening sockets and connection summary
+- `TrafficView`: per-interface traffic counters and live-rate estimates
+- `Kismet`: passive capture/service status, source awareness, on-device device browsing, and FoxHunt handoff
 - `FoxHunt`: saved-session and live-target tracking workflow
 - `Wifite`: passive target staging plus a generic configurable command runner
 - `RaspyJack`: managed-app handoff page for starting/stopping the RaspyJack stack
@@ -72,6 +75,7 @@ kari-launcher/
 │  ├─ wifite_prep.py
 │  ├─ angryoxide_menu.py
 │  ├─ lantern.py
+│  ├─ ops_pages.py
 │  └─ ...
 ├─ systemd/
 │  ├─ kari-dashboard.service
@@ -104,7 +108,10 @@ Common patterns:
 - `Overview`: `OK` refresh, `LEFT/RIGHT` change page
 - `GPS`: `UP/DOWN` scroll, `OK` refresh
 - `Network Ops`: `UP/DOWN` scroll, `OK` open menu, `KEY2` refresh
-- `Lantern`: `UP/DOWN` move through hosts, `OK` open menu, `KEY2` refresh
+- `Lantern`: `OK` opens the idle menu, `Light the Way` performs host + service discovery, then `UP/DOWN` pages through one host at a time
+- `SocketWatch`: `UP/DOWN` move through sockets, `OK` open menu, `KEY2` refresh
+- `TrafficView`: `UP/DOWN` move through interfaces, `OK` open menu, `KEY2` refresh
+- `Kismet`: `OK` opens the menu, `Browse Devices` splits into `Wireless` / `Bluetooth`, `UP/DOWN` navigates the active chooser, and `Recover Link` stops Kismet and restarts `NetworkManager` if the primary link gets knocked out
 - `FoxHunt`, `Wifite`, `AngryOxide`: menu-driven pages with scan lists and context-specific footer hints
 - `RaspyJack`: action-row page with launch/stop controls
 
@@ -190,7 +197,7 @@ After boot:
 
 - `Overview` should show hostname, Tailscale IP, battery, CPU, RAM, and GPS summary.
 - `Network Ops` should show `wlan0` plus any attached external radios.
-- `Lantern` should populate once the Pi has ARP/neigh data or after a refresh.
+- `Lantern` should at least show the local `wlan0` IP and gateway even before you run `Light the Way`.
 - The web UI should load without depending on the physical display.
 
 If any of those fail, fix them before enabling watchdog or remote control. Future-you will appreciate the restraint.
@@ -419,25 +426,26 @@ Warnings:
 
 ### Lantern
 
-Passive local subnet discovery page.
+Connected-LAN discovery and selected-host service inventory page.
 
 Shows:
 
-- local interface
-- local IP and gateway
-- cached neighbor entries
-- best-effort hostnames
-- vendor-enriched labels when available
+- idle summary with local interface, local IP, and gateway
+- staged host-and-service discovery via `Light the Way`
+- one selected host per on-device page once discovery completes
+- best-effort hostnames and vendor labels
+- wrapped open-port summary for the selected host
 
 Menu actions:
 
-- refresh data
-- clear cache
+- `Light the Way` from idle
+- `Refresh` from detail view
+- `Exit` from detail view
 
 Use it for:
 
 - confirming who is present on the local subnet
-- checking gateway and device presence
+- quickly checking one host's open services without leaving the launcher
 
 ### FoxHunt
 
@@ -746,9 +754,11 @@ Warnings:
 
 1. Confirm `wlan0` has an IP.
 2. Open `Lantern`.
-3. Press refresh.
-4. If names are sparse, that is normal. The page uses local neighbor data and best-effort enrichment, not router-specific discovery magic.
-5. Use it as a quick subnet presence panel, not a full inventory system.
+3. Confirm the idle page shows the local IP and gateway.
+4. Choose `Light the Way`.
+5. Wait for host discovery and selected-host service scans to complete.
+6. Use `UP/DOWN` to move device-by-device.
+7. If names are sparse, that is normal. The page uses local neighbor data, vendor hints, and lightweight service probing, not router-specific discovery magic.
 
 ### Tutorial: enable safe remote access
 
@@ -816,6 +826,22 @@ Common causes:
 - over-frequent scans
 - deep SMB stats on weak hardware
 - over-aggressive remote refresh usage
+
+### Kismet starts but grabs the wrong radio
+
+Current intended behavior on this build:
+
+- `wlan0` stays managed for connectivity
+- if `wlan2` exists, Kismet auto-prefers `wlan2` on service start
+- if `wlan2` does not exist, Wi-Fi capture remains manual instead of silently stealing `wlan1`
+
+Check:
+
+- `/etc/kismet/kismet_site.conf`
+- `systemctl cat kismet.service`
+- the `Kismet` launcher page, which now reports the active Wi-Fi and Bluetooth sources
+
+If Bluetooth is missing from the Kismet page, confirm `hci0` exists before Kismet starts.
 
 ## Operational Warnings
 

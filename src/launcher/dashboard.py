@@ -66,6 +66,7 @@ from .angryoxide_menu import AngryOxideMenuController
 from .effects import HudEffects
 from .foxhunt import FoxhuntController
 from .lantern import LanternController
+from .ops_pages import KismetController, NmapController, SocketWatchController, TrafficViewController
 from .theme import THEMES, Theme, load_theme_name_from_env, next_theme_name
 from .ui_primitives import GlowCache, PanelStyle, TextRenderer, draw_panel, draw_status_dot
 from .wifite_prep import WifitePrepController
@@ -122,6 +123,10 @@ SAFE_REMOTE_ACTIONS = {
     "goto_wifite",
     "goto_networkops",
     "goto_lantern",
+    "goto_nmap",
+    "goto_socketwatch",
+    "goto_trafficview",
+    "goto_kismet",
     "goto_overview",
     "goto_raspyjack",
     "goto_angryoxide",
@@ -142,6 +147,19 @@ SAFE_REMOTE_ACTIONS = {
     "wf_run_hello",
     "lantern_refresh",
     "lantern_clear",
+    "lantern_service",
+    "lantern_clear_details",
+    "socketwatch_refresh",
+    "trafficview_refresh",
+    "trafficview_reset",
+    "kismet_refresh",
+    "kismet_start",
+    "kismet_stop",
+    "kismet_restart",
+    "kismet_recover",
+    "nmap_refresh",
+    "nmap_services",
+    "nmap_clear",
     "net_refresh",
     "net_reconnect_wlan0",
     "net_restart_launcher",
@@ -286,6 +304,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "interface": "wlan1",
         "scan_max_results": 32,
         "scan_interval_active_seconds": 4.0,
+    },
+    "socketwatch": {
+        "refresh_interval_seconds": 8.0,
+    },
+    "trafficview": {
+        "refresh_interval_seconds": 2.0,
+    },
+    "kismet": {
+        "refresh_interval_seconds": 20.0,
+        "service_names": ["kismet.service"],
+        "primary_interface": "wlan0",
+        "networkmanager_service": "NetworkManager.service",
+        "webui_host": "127.0.0.1",
+        "webui_port": 2501,
+        "capture_dirs": ["/var/log/kismet", "~/kismet"],
+    },
+    "nmap": {
+        "interface": "wlan0",
+        "refresh_interval_seconds": 60.0,
+        "top_ports": 20,
     },
     "network_ops": {
         "primary_iface": "wlan0",
@@ -2472,6 +2510,27 @@ class DashboardApp:
             status_cb=self._set_status,
             redraw_cb=self._request_redraw,
         )
+        self.socketwatch = SocketWatchController(
+            self.config.get("socketwatch", {}) if isinstance(self.config.get("socketwatch"), dict) else {},
+            status_cb=self._set_status,
+            redraw_cb=self._request_redraw,
+        )
+        self.trafficview = TrafficViewController(
+            self.config.get("trafficview", {}) if isinstance(self.config.get("trafficview"), dict) else {},
+            status_cb=self._set_status,
+            redraw_cb=self._request_redraw,
+        )
+        self.kismet = KismetController(
+            self.config.get("kismet", {}) if isinstance(self.config.get("kismet"), dict) else {},
+            status_cb=self._set_status,
+            redraw_cb=self._request_redraw,
+            hunt_cb=self._foxhunt_from_kismet,
+        )
+        self.nmap_page = NmapController(
+            self.config.get("nmap", {}) if isinstance(self.config.get("nmap"), dict) else {},
+            status_cb=self._set_status,
+            redraw_cb=self._request_redraw,
+        )
         self.ao_menu = AngryOxideMenuController(
             self.config.get("angryoxide", {}) if isinstance(self.config.get("angryoxide"), dict) else {},
             status_cb=self._set_status,
@@ -2575,6 +2634,14 @@ class DashboardApp:
         self.wifite_worker.start()
         self.lantern_worker = threading.Thread(target=self._lantern_loop, daemon=True)
         self.lantern_worker.start()
+        self.socketwatch_worker = threading.Thread(target=self._socketwatch_loop, daemon=True)
+        self.socketwatch_worker.start()
+        self.trafficview_worker = threading.Thread(target=self._trafficview_loop, daemon=True)
+        self.trafficview_worker.start()
+        self.kismet_worker = threading.Thread(target=self._kismet_loop, daemon=True)
+        self.kismet_worker.start()
+        self.nmap_worker = threading.Thread(target=self._nmap_loop, daemon=True)
+        self.nmap_worker.start()
         self.ao_menu_worker = threading.Thread(target=self._angryoxide_menu_loop, daemon=True)
         self.ao_menu_worker.start()
         if not self.preview_mode:
@@ -2666,6 +2733,9 @@ class DashboardApp:
     def _build_pages(self, snapshot: Snapshot) -> list[str]:
         pages = ["overview", "gps", "networkops"]
         pages.append("lantern")
+        pages.append("socketwatch")
+        pages.append("trafficview")
+        pages.append("kismet")
         pages.append("foxhunt")
         pages.append("wifite")
         pages.append("raspyjack")
@@ -2786,6 +2856,73 @@ class DashboardApp:
             except Exception as e:
                 self._set_status(f"Lantern loop: {clean_text(e, 48)}", 5.0)
             if self.stop_event.wait(timeout=2.0):
+                break
+
+    def _socketwatch_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.socketwatch.tick()
+            except Exception as e:
+                self._set_status(f"SocketWatch loop: {clean_text(e, 48)}", 5.0)
+            if self.stop_event.wait(timeout=2.0):
+                break
+
+    def _trafficview_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.trafficview.tick()
+            except Exception as e:
+                self._set_status(f"TrafficView loop: {clean_text(e, 48)}", 5.0)
+            if self.stop_event.wait(timeout=1.0):
+                break
+
+    def _kismet_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.kismet.tick()
+            except Exception as e:
+                self._set_status(f"Kismet loop: {clean_text(e, 48)}", 5.0)
+            if self.stop_event.wait(timeout=3.0):
+                break
+
+    def _foxhunt_from_kismet(self, device: dict[str, Any]) -> bool:
+        mac = clean_text(device.get("mac", ""), 32).lower()
+        if not mac:
+            return False
+        if clean_text(device.get("phy", ""), 24).lower().startswith("bluetooth"):
+            return False
+        label = clean_text(device.get("label", "") or device.get("manufacturer", "") or mac, 64)
+        channel_raw = device.get("channel")
+        channel: int | None = None
+        try:
+            if channel_raw not in (None, "", "n/a"):
+                channel = int(str(channel_raw))
+        except Exception:
+            channel = None
+        signal = device.get("signal")
+        rssi: int | None = None
+        try:
+            if signal not in (None, "", "n/a"):
+                rssi = int(signal)
+        except Exception:
+            rssi = None
+        security = clean_text(device.get("crypt", "") or "unknown", 24)
+        ok = self.foxhunt.set_external_target(label, mac, channel, security=security, rssi=rssi)
+        if not ok:
+            return False
+        if "foxhunt" in self.pages:
+            idx = self.pages.index("foxhunt")
+            direction = 1 if idx >= self.page_idx else -1
+            self._set_page_index(idx, direction=direction)
+        return True
+
+    def _nmap_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.nmap_page.tick()
+            except Exception as e:
+                self._set_status(f"Nmap loop: {clean_text(e, 48)}", 5.0)
+            if self.stop_event.wait(timeout=3.0):
                 break
 
     def _angryoxide_menu_loop(self) -> None:
@@ -2999,6 +3136,17 @@ class DashboardApp:
             "wf_run": "wf_run",
             "lantern_refresh": "lantern_refresh",
             "lantern_clear": "lantern_clear",
+            "socketwatch_refresh": "socketwatch_refresh",
+            "trafficview_refresh": "trafficview_refresh",
+            "trafficview_reset": "trafficview_reset",
+            "kismet_refresh": "kismet_refresh",
+            "kismet_start": "kismet_start",
+            "kismet_stop": "kismet_stop",
+            "kismet_restart": "kismet_restart",
+            "kismet_recover": "kismet_recover",
+            "nmap_refresh": "nmap_refresh",
+            "nmap_services": "nmap_services",
+            "nmap_clear": "nmap_clear",
             "ao_toggle": "ao_toggle",
             "ao_scan_all": "ao_scan_all",
             "ao_select_network": "ao_select_network",
@@ -3013,6 +3161,10 @@ class DashboardApp:
             "gps": "goto_gps",
             "networkops": "goto_networkops",
             "lantern": "goto_lantern",
+            "nmap": "goto_nmap",
+            "socketwatch": "goto_socketwatch",
+            "trafficview": "goto_trafficview",
+            "kismet": "goto_kismet",
             "foxhunt": "goto_foxhunt",
             "wifite": "goto_wifite",
             "raspyjack": "goto_raspyjack",
@@ -3107,6 +3259,22 @@ class DashboardApp:
                 if self.lantern.block_page_cycle() and self.lantern.back():
                     self._log_remote_action(action, source, "ok")
                     return
+            if page == "nmap":
+                if self.nmap_page.block_page_cycle() and self.nmap_page.back():
+                    self._log_remote_action(action, source, "ok")
+                    return
+            if page == "socketwatch":
+                if self.socketwatch.block_page_cycle() and self.socketwatch.back():
+                    self._log_remote_action(action, source, "ok")
+                    return
+            if page == "trafficview":
+                if self.trafficview.block_page_cycle() and self.trafficview.back():
+                    self._log_remote_action(action, source, "ok")
+                    return
+            if page == "kismet":
+                if self.kismet.block_page_cycle() and self.kismet.back():
+                    self._log_remote_action(action, source, "ok")
+                    return
             if page == "networkops":
                 if self.network_ops_menu_open:
                     if self.network_ops_menu_state == "mode":
@@ -3140,6 +3308,18 @@ class DashboardApp:
                 self._log_remote_action(action, source, "blocked")
                 return
             if page == "lantern" and self.lantern.block_page_cycle():
+                self._log_remote_action(action, source, "blocked")
+                return
+            if page == "nmap" and self.nmap_page.block_page_cycle():
+                self._log_remote_action(action, source, "blocked")
+                return
+            if page == "socketwatch" and self.socketwatch.block_page_cycle():
+                self._log_remote_action(action, source, "blocked")
+                return
+            if page == "trafficview" and self.trafficview.block_page_cycle():
+                self._log_remote_action(action, source, "blocked")
+                return
+            if page == "kismet" and self.kismet.block_page_cycle():
                 self._log_remote_action(action, source, "blocked")
                 return
             if page == "networkops" and self.network_ops_menu_open:
@@ -3182,6 +3362,22 @@ class DashboardApp:
             return
         if action.startswith("lantern_"):
             ok = self.lantern.remote_action(action)
+            self._log_remote_action(action, source, "ok" if ok else "invalid_state")
+            return
+        if action.startswith("socketwatch_"):
+            ok = self.socketwatch.remote_action(action)
+            self._log_remote_action(action, source, "ok" if ok else "invalid_state")
+            return
+        if action.startswith("trafficview_"):
+            ok = self.trafficview.remote_action(action)
+            self._log_remote_action(action, source, "ok" if ok else "invalid_state")
+            return
+        if action.startswith("kismet_"):
+            ok = self.kismet.remote_action(action)
+            self._log_remote_action(action, source, "ok" if ok else "invalid_state")
+            return
+        if action.startswith("nmap_"):
+            ok = self.nmap_page.remote_action(action)
             self._log_remote_action(action, source, "ok" if ok else "invalid_state")
             return
         if action.startswith("net_"):
@@ -3237,6 +3433,10 @@ class DashboardApp:
             "goto_gps": "gps",
             "goto_networkops": "networkops",
             "goto_lantern": "lantern",
+            "goto_nmap": "nmap",
+            "goto_socketwatch": "socketwatch",
+            "goto_trafficview": "trafficview",
+            "goto_kismet": "kismet",
             "goto_foxhunt": "foxhunt",
             "goto_wifite": "wifite",
             "goto_raspyjack": "raspyjack",
@@ -3842,6 +4042,10 @@ class DashboardApp:
         foxhunt = self.foxhunt.status_payload()
         wifite = self.wifite.status_payload()
         lantern = self.lantern.status_payload()
+        socketwatch = self.socketwatch.status_payload()
+        trafficview = self.trafficview.status_payload()
+        kismet = self.kismet.status_payload()
+        nmap_page = self.nmap_page.status_payload()
         with self.data_lock:
             ao_running = bool(self.snapshot.angryoxide.running)
         ao_menu = self.ao_menu.status_payload(ao_running)
@@ -3869,6 +4073,18 @@ class DashboardApp:
             },
             "lantern": {
                 **lantern,
+            },
+            "socketwatch": {
+                **socketwatch,
+            },
+            "trafficview": {
+                **trafficview,
+            },
+            "kismet": {
+                **kismet,
+            },
+            "nmap": {
+                **nmap_page,
             },
             "local": {
                 "tailscale_ip": snap.tailscale_ip,
@@ -4423,6 +4639,9 @@ class DashboardApp:
           <button class="nav-btn" data-nav="gps" onclick="act('gps')">GPS<small>satellite lock</small></button>
           <button class="nav-btn" data-nav="networkops" onclick="act('networkops')">Network Ops<small>interfaces and recovery</small></button>
           <button class="nav-btn" data-nav="lantern" onclick="act('lantern')">Lantern<small>local host discovery</small></button>
+          <button class="nav-btn" data-nav="socketwatch" onclick="act('socketwatch')">SocketWatch<small>local sockets</small></button>
+          <button class="nav-btn" data-nav="trafficview" onclick="act('trafficview')">TrafficView<small>interface throughput</small></button>
+          <button class="nav-btn" data-nav="kismet" onclick="act('kismet')">Kismet<small>passive capture status</small></button>
           <button class="nav-btn" data-nav="foxhunt" onclick="act('foxhunt')">FoxHunt<small>recon and tracking</small></button>
           <button class="nav-btn" data-nav="wifite" onclick="act('wifite')">Wifite<small>passive target prep</small></button>
           <button class="nav-btn" data-nav="raspyjack" onclick="act('raspyjack')">RaspyJack<small>stack and loot</small></button>
@@ -4510,11 +4729,42 @@ class DashboardApp:
           <h3 class="section-title">Lantern</h3>
           <div class="blurb mono" id="lantern">loading...</div>
           <div class="controls">
-            <button class="action-btn" onclick="act('lantern_refresh')">Refresh Data</button>
-            <button class="action-btn" onclick="act('lantern_clear')">Clear Cache</button>
-            <button class="action-btn" onclick="act('refresh')">Refresh Launcher</button>
+            <button class="action-btn" onclick="act('lantern_refresh')">Light the Way</button>
+            <button class="action-btn" onclick="act('lantern_clear')">Exit Details</button>
           </div>
           <pre class="log" id="lanternlog">(loading)</pre>
+        </section>
+
+        <section class="panel page" data-view="socketwatch">
+          <h3 class="section-title">SocketWatch</h3>
+          <div class="blurb mono" id="socketwatch">loading...</div>
+          <div class="controls">
+            <button class="action-btn" onclick="act('socketwatch_refresh')">Refresh Data</button>
+          </div>
+          <pre class="log" id="socketwatchlog">(loading)</pre>
+        </section>
+
+        <section class="panel page" data-view="trafficview">
+          <h3 class="section-title">TrafficView</h3>
+          <div class="blurb mono" id="trafficview">loading...</div>
+          <div class="controls">
+            <button class="action-btn" onclick="act('trafficview_refresh')">Refresh Data</button>
+            <button class="action-btn" onclick="act('trafficview_reset')">Reset Rates</button>
+          </div>
+          <pre class="log" id="trafficviewlog">(loading)</pre>
+        </section>
+
+        <section class="panel page" data-view="kismet">
+          <h3 class="section-title">Kismet</h3>
+          <div class="blurb mono" id="kismet">loading...</div>
+          <div class="controls">
+            <button class="action-btn" onclick="act('kismet_refresh')">Refresh Data</button>
+            <button class="action-btn" onclick="act('kismet_start')">Start Service</button>
+            <button class="action-btn" onclick="act('kismet_stop')">Stop Service</button>
+            <button class="action-btn" onclick="act('kismet_restart')">Restart Service</button>
+            <button class="action-btn" onclick="act('kismet_recover')">Recover Link</button>
+          </div>
+          <pre class="log" id="kismetlog">(loading)</pre>
         </section>
 
         <section class="panel page" data-view="foxhunt">
@@ -4622,6 +4872,9 @@ class DashboardApp:
       gps: { title: "GPS", desc: "Satellite lock, fix quality, and receiver detail." },
       networkops: { title: "Network Ops", desc: "Interface state, services, and recovery actions." },
       lantern: { title: "Lantern", desc: "Local subnet neighbors and cached host presence." },
+      socketwatch: { title: "SocketWatch", desc: "Listening ports and established socket counts." },
+      trafficview: { title: "TrafficView", desc: "Interface byte counters and live throughput." },
+      kismet: { title: "Kismet", desc: "Passive capture stack status and recent files." },
       foxhunt: { title: "FoxHunt", desc: "Wireless recon, target lock, and hunt state." },
       wifite: { title: "Wifite", desc: "Passive network selection and target prep." },
       raspyjack: { title: "RaspyJack", desc: "Stack state, loot, and latest nmap output." },
@@ -4845,13 +5098,29 @@ class DashboardApp:
         const lanternLastAge = (lantern.last_refresh_age_s === null || lantern.last_refresh_age_s === undefined) ? "n/a" : `${Math.round(Number(lantern.last_refresh_age_s))}s`;
         const lanternLastDur = (lantern.last_refresh_duration_s === null || lantern.last_refresh_duration_s === undefined) ? "n/a" : `${Math.round(Number(lantern.last_refresh_duration_s))}s`;
         const pad = (value, width) => String(value ?? "").slice(0, width).padEnd(width, " ");
-        document.getElementById("lantern").innerHTML =
-          `mode ${esc(lantern.state || "idle")} | iface ${esc(lantern.iface || "wlan0")}<br>` +
-          `hosts ${esc(lantern.host_count ?? 0)} | self ${esc(lantern.local_ip || "n/a")} | gw ${esc(lantern.gateway || "n/a")}<br>` +
-          `selected ${esc(lanternSelected.label || lanternSelected.hostname || lanternSelected.ip || "none")} | mac ${esc(lanternSelected.mac || "--")}<br>` +
-          `vendor ${esc(lanternSelected.vendor || "n/a")}<br>` +
-          `source ${esc(lantern.last_source || "none")} | last ${esc(lanternLastAge)} | dur ${esc(lanternLastDur)}<br>` +
-          `status ${esc(lantern.last_error || "ready")}`;
+        if (lantern.state === "scanning") {
+          document.getElementById("lantern").innerHTML =
+            `mode scanning | iface ${esc(lantern.iface || "wlan0")}<br>` +
+            `progress ${esc(lantern.scan_progress_current ?? 0)}/${esc(lantern.scan_progress_total ?? 0)}<br>` +
+            `${esc(lantern.scan_progress_label || "working")}<br>` +
+            `self ${esc(lantern.local_ip || "n/a")} | gw ${esc(lantern.gateway || "n/a")}<br>` +
+            `status scanning`;
+        } else if (lantern.state === "detail") {
+          document.getElementById("lantern").innerHTML =
+            `mode detail | iface ${esc(lantern.iface || "wlan0")}<br>` +
+            `hosts ${esc(lantern.host_count ?? 0)} | self ${esc(lantern.local_ip || "n/a")} | gw ${esc(lantern.gateway || "n/a")}<br>` +
+            `selected ${esc(lanternSelected.label || lanternSelected.hostname || lanternSelected.ip || "none")} | ip ${esc(lanternSelected.ip || "n/a")}<br>` +
+            `mac ${esc(lanternSelected.mac || "--")} | state ${esc(lanternSelected.state || "n/a")}<br>` +
+            `source ${esc(lantern.last_source || "none")} | last ${esc(lanternLastAge)} | dur ${esc(lanternLastDur)}<br>` +
+            `status ${esc(lantern.last_error || "ready")}`;
+        } else {
+          document.getElementById("lantern").innerHTML =
+            `mode idle | iface ${esc(lantern.iface || "wlan0")}<br>` +
+            `hosts ${esc(lantern.host_count ?? 0)} | self ${esc(lantern.local_ip || "n/a")} | gw ${esc(lantern.gateway || "n/a")}<br>` +
+            `source ${esc(lantern.last_source || "none")} | last ${esc(lanternLastAge)} | dur ${esc(lanternLastDur)}<br>` +
+            `status ${esc(lantern.last_error || "ready")}<br>` +
+            `menu Light the Way`;
+        }
         const lanternRows = (lantern.entries || []).slice(0, 8).map((row, idx) => {
           const pointer = idx === Number(lantern.selected_index || 0) ? ">" : " ";
           const label = row.label || row.hostname || row.ip || "host";
@@ -4869,8 +5138,84 @@ class DashboardApp:
           lanternRows.unshift(`${pad("HOST", 20)} ${pad("IP", 15)} ${pad("MAC", 17)} STATE`);
           lanternRows.splice(1, 0, "");
         }
+        const selectedServices = (lanternSelected.services || []);
+        if (selectedServices.length) {
+          lanternRows.push("");
+          lanternRows.push(`services ${lanternSelected.ip || "selected"}`);
+          lanternRows.push(...selectedServices.slice(-6));
+        }
         document.getElementById("lanternlog").textContent =
           lanternRows.length ? lanternRows.join("\\n") : "(no local hosts discovered)";
+
+        const sw = d.socketwatch || {};
+        const swSelected = sw.selected_socket || {};
+        const swLastAge = (sw.last_refresh_age_s === null || sw.last_refresh_age_s === undefined) ? "n/a" : `${Math.round(Number(sw.last_refresh_age_s))}s`;
+        const swLastDur = (sw.last_refresh_duration_s === null || sw.last_refresh_duration_s === undefined) ? "n/a" : `${Math.round(Number(sw.last_refresh_duration_s))}s`;
+        document.getElementById("socketwatch").innerHTML =
+          `listeners ${esc(sw.listener_count ?? 0)} | established ${esc(sw.established_count ?? 0)}<br>` +
+          `selected ${esc((swSelected.proto || "").toUpperCase() || "n/a")} ${esc(swSelected.port || "n/a")} | host ${esc(swSelected.host || "n/a")}<br>` +
+          `last ${esc(swLastAge)} | dur ${esc(swLastDur)}<br>` +
+          `status ${esc(sw.last_error || "ready")}`;
+        const swRows = (sw.listeners || []).slice(0, 10).map((row, idx) => {
+          const pointer = idx === Number(sw.selected_index || 0) ? ">" : " ";
+          return `${pointer} ${pad(String(row.proto || "").toUpperCase(), 5)} ${pad(row.port || "", 7)} ${pad(row.host || "", 18)} LISTEN`;
+        });
+        document.getElementById("socketwatchlog").textContent =
+          swRows.length ? swRows.join("\\n") : "(no socket data)";
+
+        const tv = d.trafficview || {};
+        const tvSelected = tv.selected_entry || {};
+        const tvLastAge = (tv.last_refresh_age_s === null || tv.last_refresh_age_s === undefined) ? "n/a" : `${Math.round(Number(tv.last_refresh_age_s))}s`;
+        const tvLastDur = (tv.last_refresh_duration_s === null || tv.last_refresh_duration_s === undefined) ? "n/a" : `${Math.round(Number(tv.last_refresh_duration_s))}s`;
+        document.getElementById("trafficview").innerHTML =
+          `ifaces ${esc((tv.entries || []).length)} | last ${esc(tvLastAge)} | dur ${esc(tvLastDur)}<br>` +
+          `selected ${esc(tvSelected.iface || "none")}<br>` +
+          `rx ${esc(tvSelected.rx_rate === undefined ? "n/a" : tvSelected.rx_rate)} B/s | tx ${esc(tvSelected.tx_rate === undefined ? "n/a" : tvSelected.tx_rate)} B/s<br>` +
+          `status ${esc(tv.last_error || "ready")}`;
+        const tvRows = (tv.entries || []).slice(0, 10).map((row, idx) => {
+          const pointer = idx === Number(tv.selected_index || 0) ? ">" : " ";
+          const rxRate = Number(row.rx_rate || 0).toFixed(0);
+          const txRate = Number(row.tx_rate || 0).toFixed(0);
+          return `${pointer} ${pad(row.iface || "", 10)} RX ${pad(rxRate, 8)} TX ${pad(txRate, 8)}`;
+        });
+        document.getElementById("trafficviewlog").textContent =
+          tvRows.length ? tvRows.join("\\n") : "(no traffic counters)";
+
+        const ks = d.kismet || {};
+        const ksLastAge = (ks.last_refresh_age_s === null || ks.last_refresh_age_s === undefined) ? "n/a" : `${Math.round(Number(ks.last_refresh_age_s))}s`;
+        const ksLastDur = (ks.last_refresh_duration_s === null || ks.last_refresh_duration_s === undefined) ? "n/a" : `${Math.round(Number(ks.last_refresh_duration_s))}s`;
+        const ksBreakdown = ks.capture_breakdown || {};
+        const ksNewest = (ks.latest_file_age_s === null || ks.latest_file_age_s === undefined) ? "n/a" : `${Math.round(Number(ks.latest_file_age_s))}s`;
+        const ksSource = (ks.source_lines || []).slice(-3);
+        const ksWarn = (ks.warning_lines || []).slice(-4);
+        const ksLog = (ks.log_lines || []).slice(-3);
+        const ksWifiSrc = String(ks.active_wifi_source || "manual");
+        const ksBtSrc = String(ks.active_bt_source || "off");
+        const ksSel = ks.selected_device || {};
+        const ksSig = (ksSel.signal === null || ksSel.signal === undefined) ? "n/a" : `${ksSel.signal}`;
+        const ksSeen = (ksSel.last_seen_age_s === null || ksSel.last_seen_age_s === undefined) ? "n/a" : `${Math.round(Number(ksSel.last_seen_age_s))}s`;
+        const ksDevices = (ks.devices || []).slice(0, 8).map((row, idx) => {
+          const pointer = idx === Number(ks.selected_index || 0) ? ">" : " ";
+          const sig = (row.signal === null || row.signal === undefined) ? "n/a" : row.signal;
+          return `${pointer} ${String(row.label || "device").slice(0, 18)} | ${row.phy || "?"} | ${sig}`;
+        });
+        document.getElementById("kismet").innerHTML =
+          `service ${esc(ks.service_state || "unknown")} | proc ${esc(ks.proc_running ? "yes" : "no")}<br>` +
+          `web ${esc(ks.port_open ? "open" : "closed")} | ${esc(ks.host || "127.0.0.1")}:${esc(ks.port ?? "2501")}<br>` +
+          `wifi src ${esc(ksWifiSrc)} | bt ${esc(ksBtSrc)}<br>` +
+          `wifi ap ${esc(ks.wifi_ap_count ?? 0)} | wifi dev ${esc(ks.wifi_device_count ?? 0)} | bt ${esc(ks.bt_device_count ?? 0)}<br>` +
+          `captures ${esc(ks.capture_files ?? 0)} | kismet ${esc(ksBreakdown.kismet ?? 0)} | pcap ${esc(ksBreakdown.pcapng ?? 0)}<br>` +
+          `selected ${esc(ksSel.label || "none")} | sig ${esc(ksSig)} | seen ${esc(ksSeen)}<br>` +
+          `newest ${esc(ksNewest)} | last ${esc(ksLastAge)} | dur ${esc(ksLastDur)}<br>` +
+          `status ${esc(ks.last_error || "ready")}`;
+        document.getElementById("kismetlog").textContent =
+          [
+            ksDevices.length ? "Devices:\\n" + ksDevices.join("\\n") : "",
+            ksSource.length ? "Sources:\\n" + ksSource.join("\\n") : "",
+            ksWarn.length ? "Warnings:\\n" + ksWarn.join("\\n") : "",
+            (ks.latest_files && ks.latest_files.length) ? "Files:\\n" + ks.latest_files.join("\\n") : "",
+            ksLog.length ? "Log:\\n" + ksLog.join("\\n") : "",
+          ].filter(Boolean).join("\\n\\n") || "(no recent kismet activity)";
 
         const fh = d.foxhunt || {};
         const fhView = fh.view || {};
@@ -5187,6 +5532,14 @@ class DashboardApp:
             return self.wifite.footer_text()
         if page == "lantern":
             return self.lantern.footer_text()
+        if page == "nmap":
+            return self.nmap_page.footer_text()
+        if page == "socketwatch":
+            return self.socketwatch.footer_text()
+        if page == "trafficview":
+            return self.trafficview.footer_text()
+        if page == "kismet":
+            return self.kismet.footer_text()
         if page == "networkops":
             if self.network_ops_menu_open:
                 return "U/D select  OK run  Y close  K3 home"
@@ -5279,6 +5632,7 @@ class DashboardApp:
         )
         lines = [
             (f"TS {snap.tailscale_ip}", theme.text),
+            (f"W0 {snap.network.primary_ip}", theme.text),
             (f"BAT {fmt_pct(snap.battery_pct)}", theme.text),
             (f"TEMP {snap.cpu_temp if snap.cpu_temp is not None else 'n/a'}C", theme.text),
             (f"CPU {fmt_pct(snap.cpu_usage_pct)}  RAM {fmt_pct(snap.mem_used_pct)}", theme.text),
@@ -5648,28 +6002,53 @@ class DashboardApp:
     def _draw_lantern_page(self, theme: Theme, snap: Snapshot) -> None:
         view = self.lantern.render_view()
         lines: list[tuple[str, tuple[int, int, int]]] = []
-        for idx, line in enumerate(view.lines[:4]):
+        for idx, line in enumerate(list(view.lines)):
             color = theme.dim_text if idx < 4 else theme.text
             lines.append((line, color))
-        if view.list_rows:
-            lines.append(("", theme.dim_text))
-            for idx, row in enumerate(view.list_rows):
-                prefix = ">" if idx == view.list_selected else " "
-                state = clean_text(row[3], 6)
-                lines.append((clean_text(f"{prefix} {row[0]} {state}", 34), theme.text))
-                lines.append((clean_text(f"  IP {row[1]}", 34), theme.dim_text))
-                lines.append((clean_text(f"  MAC {row[2]}", 34), theme.dim_text))
-                lines.append(("", theme.dim_text))
-            selected_line = 5 + (view.list_selected * 4)
-            visible_rows = 6
-            max_off = max(0, len(lines) - visible_rows)
-            desired_off = max(0, min(selected_line - 2, max_off))
-            self.page_scroll["lantern"] = desired_off
-        else:
-            lines.append(("(no local hosts)", theme.dim_text))
         self._draw_main_panel(theme, "LOCAL DISCOVERY", "Lantern", lines, "lantern")
         if view.menu_open:
             self._draw_foxhunt_menu(theme, view.menu_title, view.menu_items, view.menu_index)
+
+    def _draw_ops_page(
+        self,
+        theme: Theme,
+        label: str,
+        title: str,
+        view: Any,
+        page_key: str,
+    ) -> None:
+        lines: list[tuple[str, tuple[int, int, int]]] = []
+        for idx, line in enumerate(list(getattr(view, "lines", []))):
+            color = theme.dim_text if idx < 4 else theme.text
+            lines.append((line, color))
+        rows = list(getattr(view, "list_rows", []))
+        if rows:
+            lines.append(("", theme.dim_text))
+            for idx, row in enumerate(rows):
+                prefix = ">" if idx == int(getattr(view, "list_selected", 0) or 0) else " "
+                lines.append((clean_text(f"{prefix} {row[0]} {row[3]}", 34), theme.text))
+                lines.append((clean_text(f"  {row[1]}", 34), theme.dim_text))
+                lines.append((clean_text(f"  {row[2]}", 34), theme.dim_text))
+                lines.append(("", theme.dim_text))
+            selected_line = 5 + (int(getattr(view, "list_selected", 0) or 0) * 4)
+            visible_rows = 6
+            max_off = max(0, len(lines) - visible_rows)
+            self.page_scroll[page_key] = max(0, min(selected_line - 2, max_off))
+        self._draw_main_panel(theme, label, title, lines, page_key)
+        if getattr(view, "menu_open", False):
+            self._draw_foxhunt_menu(theme, getattr(view, "menu_title", f"{title.upper()} MENU"), list(getattr(view, "menu_items", [])), int(getattr(view, "menu_index", 0) or 0))
+
+    def _draw_nmap_page(self, theme: Theme, snap: Snapshot) -> None:
+        self._draw_ops_page(theme, "SUBNET INVENTORY", "Nmap", self.nmap_page.render_view(), "nmap")
+
+    def _draw_socketwatch_page(self, theme: Theme, snap: Snapshot) -> None:
+        self._draw_ops_page(theme, "LOCAL SOCKETS", "SocketWatch", self.socketwatch.render_view(), "socketwatch")
+
+    def _draw_trafficview_page(self, theme: Theme, snap: Snapshot) -> None:
+        self._draw_ops_page(theme, "LINK THROUGHPUT", "TrafficView", self.trafficview.render_view(), "trafficview")
+
+    def _draw_kismet_page(self, theme: Theme, snap: Snapshot) -> None:
+        self._draw_ops_page(theme, "PASSIVE CAPTURE", "Kismet", self.kismet.render_view(), "kismet")
 
     def _draw_wifite_page(self, theme: Theme, snap: Snapshot) -> None:
         view = self.wifite.render_view()
@@ -5803,6 +6182,14 @@ class DashboardApp:
                 self._draw_network_ops_page(theme, snap)
             elif page == "lantern":
                 self._draw_lantern_page(theme, snap)
+            elif page == "nmap":
+                self._draw_nmap_page(theme, snap)
+            elif page == "socketwatch":
+                self._draw_socketwatch_page(theme, snap)
+            elif page == "trafficview":
+                self._draw_trafficview_page(theme, snap)
+            elif page == "kismet":
+                self._draw_kismet_page(theme, snap)
             elif page.startswith("node:"):
                 self._draw_node_page(theme, snap, page.split(":", 1)[1])
             elif page == "foxhunt":
@@ -6103,6 +6490,21 @@ class DashboardApp:
         if page == "lantern":
             self.lantern.move(delta)
             return
+        if page == "nmap":
+            self.nmap_page.move(delta)
+            return
+        if page == "socketwatch":
+            self.socketwatch.move(delta)
+            return
+        if page == "trafficview":
+            self.trafficview.move(delta)
+            return
+        if page == "kismet":
+            if self.kismet.block_page_cycle():
+                self.kismet.move(delta)
+            else:
+                self._scroll_page(page, delta)
+            return
         if page == "networkops":
             if self.network_ops_menu_open:
                 count = len(self._network_ops_menu_items())
@@ -6133,6 +6535,18 @@ class DashboardApp:
             return
         if page == "lantern":
             self.lantern.ok()
+            return
+        if page == "nmap":
+            self.nmap_page.ok()
+            return
+        if page == "socketwatch":
+            self.socketwatch.ok()
+            return
+        if page == "trafficview":
+            self.trafficview.ok()
+            return
+        if page == "kismet":
+            self.kismet.ok()
             return
         if page == "overview":
             self._set_status("Refreshing...", 3.0)
@@ -6189,6 +6603,46 @@ class DashboardApp:
                 self.lantern.secondary()
             elif key == pygame.K_F3:
                 if not self.lantern.back():
+                    self._set_page_index(self._home_page_index(), direction=-1)
+            return
+
+        if page == "nmap":
+            if key in (pygame.K_x, pygame.K_RETURN, pygame.K_F1):
+                self.nmap_page.ok()
+            elif key in (pygame.K_y, pygame.K_F2):
+                self.nmap_page.secondary()
+            elif key == pygame.K_F3:
+                if not self.nmap_page.back():
+                    self._set_page_index(self._home_page_index(), direction=-1)
+            return
+
+        if page == "socketwatch":
+            if key in (pygame.K_x, pygame.K_RETURN, pygame.K_F1):
+                self.socketwatch.ok()
+            elif key in (pygame.K_y, pygame.K_F2):
+                self.socketwatch.secondary()
+            elif key == pygame.K_F3:
+                if not self.socketwatch.back():
+                    self._set_page_index(self._home_page_index(), direction=-1)
+            return
+
+        if page == "trafficview":
+            if key in (pygame.K_x, pygame.K_RETURN, pygame.K_F1):
+                self.trafficview.ok()
+            elif key in (pygame.K_y, pygame.K_F2):
+                self.trafficview.secondary()
+            elif key == pygame.K_F3:
+                if not self.trafficview.back():
+                    self._set_page_index(self._home_page_index(), direction=-1)
+            return
+
+        if page == "kismet":
+            if key in (pygame.K_x, pygame.K_RETURN, pygame.K_F1):
+                self.kismet.ok()
+            elif key in (pygame.K_y, pygame.K_F2):
+                self.kismet.secondary()
+            elif key == pygame.K_F3:
+                if not self.kismet.back():
                     self._set_page_index(self._home_page_index(), direction=-1)
             return
 
@@ -6295,6 +6749,18 @@ class DashboardApp:
                             if self._current_page() == "lantern":
                                 if self.lantern.block_page_cycle() and self.lantern.back():
                                     continue
+                            if self._current_page() == "nmap":
+                                if self.nmap_page.block_page_cycle() and self.nmap_page.back():
+                                    continue
+                            if self._current_page() == "socketwatch":
+                                if self.socketwatch.block_page_cycle() and self.socketwatch.back():
+                                    continue
+                            if self._current_page() == "trafficview":
+                                if self.trafficview.block_page_cycle() and self.trafficview.back():
+                                    continue
+                            if self._current_page() == "kismet":
+                                if self.kismet.block_page_cycle() and self.kismet.back():
+                                    continue
                             if self._current_page() == "networkops":
                                 if self.network_ops_menu_open:
                                     if self.network_ops_menu_state == "mode":
@@ -6321,6 +6787,14 @@ class DashboardApp:
                             if self._current_page() == "wifite" and self.wifite.block_page_cycle():
                                 continue
                             if self._current_page() == "lantern" and self.lantern.block_page_cycle():
+                                continue
+                            if self._current_page() == "nmap" and self.nmap_page.block_page_cycle():
+                                continue
+                            if self._current_page() == "socketwatch" and self.socketwatch.block_page_cycle():
+                                continue
+                            if self._current_page() == "trafficview" and self.trafficview.block_page_cycle():
+                                continue
+                            if self._current_page() == "kismet" and self.kismet.block_page_cycle():
                                 continue
                             if self._current_page() == "networkops" and self.network_ops_menu_open:
                                 continue
@@ -6380,6 +6854,22 @@ class DashboardApp:
             pass
         try:
             self.lantern_worker.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            self.socketwatch_worker.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            self.trafficview_worker.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            self.kismet_worker.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            self.nmap_worker.join(timeout=1.0)
         except Exception:
             pass
         try:

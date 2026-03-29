@@ -41,6 +41,7 @@ class HostEntry:
     vendor: str
     source: str
     last_seen_ts: float
+    services: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -91,6 +92,11 @@ class LanternController:
         self.tool_avahi = self._resolve_tool("avahi-resolve-address", ["/usr/bin/avahi-resolve-address"])
         self.tool_getent = self._resolve_tool("getent", ["/usr/bin/getent"])
         self.tool_nmap = self._resolve_tool("nmap", ["/usr/bin/nmap"])
+        self.top_ports = max(5, min(50, int(cfg.get("top_ports", 20) or 20)))
+        self.scan_progress_current = 0
+        self.scan_progress_total = 0
+        self.scan_progress_label = "idle"
+        self.scan_thread: threading.Thread | None = None
 
     def _resolve_tool(self, name: str, fallbacks: list[str]) -> str:
         found = shutil.which(name)
@@ -108,12 +114,16 @@ class LanternController:
         with self.lock:
             if self.menu_open:
                 return "U/D menu  OK pick  L back"
-            if self.entries:
-                return "U/D host  OK menu  Y refresh"
+            if self.state == "scanning":
+                return "Scanning...  L back"
+            if self.state == "detail" and self.entries:
+                return "U/D device  OK menu  L back"
             return "OK menu  Y refresh  L/R page"
 
     def _menu_items(self) -> list[str]:
-        return ["Refresh Data", "Clear Cache", "Back"]
+        if self.state == "detail":
+            return ["Refresh", "Exit"]
+        return ["Light the Way", "Back"]
 
     def _run_cmd(self, args: list[str], timeout: float = 6.0) -> subprocess.CompletedProcess[str]:
         cmd = list(args)
@@ -364,10 +374,10 @@ class LanternController:
             return []
         try:
             result = subprocess.run(
-                [self.tool_nmap, "-sn", target],
+                [self.tool_nmap, "-sn", "-n", "--max-retries", "0", "--host-timeout", "1500ms", target],
                 capture_output=True,
                 text=True,
-                timeout=12.0,
+                timeout=6.0,
                 check=False,
             )
         except Exception:
@@ -394,7 +404,55 @@ class LanternController:
             existing.last_seen_ts = max(existing.last_seen_ts, item.last_seen_ts)
         return list(merged.values())
 
-    def refresh(self, force_active: bool = False) -> None:
+    def _scan_host_services(self, ip: str) -> list[str]:
+        safe_ip = _clean(ip, 32)
+        if not safe_ip or safe_ip.count(".") != 3:
+            return []
+        try:
+            result = self._run_cmd(
+                [
+                    self.tool_nmap,
+                    "-Pn",
+                    "-n",
+                    "-T4",
+                    "--max-retries",
+                    "1",
+                    "--host-timeout",
+                    "4s",
+                    "--top-ports",
+                    str(self.top_ports),
+                    "--open",
+                    safe_ip,
+                ],
+                timeout=8.0,
+            )
+        except Exception:
+            return []
+        lines: list[str] = []
+        for raw in (result.stdout or "").splitlines():
+            line = raw.strip()
+            if "/tcp" in line or "/udp" in line:
+                lines.append(_clean(line, 80))
+        return lines[:8]
+
+    def _start_scan(self) -> bool:
+        with self.lock:
+            if self.scan_thread is not None and self.scan_thread.is_alive():
+                self._set_status("Lantern already scanning", 4.0)
+                return False
+            self.state = "scanning"
+            self.menu_open = False
+            self.menu_index = 0
+            self.scan_progress_current = 0
+            self.scan_progress_total = 1
+            self.scan_progress_label = "Discovering hosts"
+            worker = threading.Thread(target=self._scan_worker, daemon=True)
+            self.scan_thread = worker
+        self.redraw_cb()
+        worker.start()
+        return True
+
+    def _scan_worker(self) -> None:
         started = time.monotonic()
         local_ip = self._iface_ip()
         gateway = self._gateway_ip()
@@ -406,6 +464,10 @@ class LanternController:
             with self.lock:
                 self.last_error = _clean(exc, 80)
                 self.last_refresh_duration_s = max(0.0, time.monotonic() - started)
+                self.state = "idle"
+                self.scan_progress_current = 0
+                self.scan_progress_total = 0
+                self.scan_progress_label = "scan failed"
             self.redraw_cb()
             return
 
@@ -414,17 +476,53 @@ class LanternController:
         if not entries:
             entries = self._parse_proc_arp()
             source = "proc-arp" if entries else "none"
-        active_due = (time.monotonic() - self.last_active_scan_completed) >= self.active_scan_interval
-        if force_active or active_due or not entries:
+        with self.lock:
+            self.scan_progress_current = 1
+            self.scan_progress_total = 2
+            self.scan_progress_label = "Fast discovery complete"
+        self.redraw_cb()
+
+        if not entries:
+            with self.lock:
+                self.scan_progress_current = 1
+                self.scan_progress_total = 2
+                self.scan_progress_label = "Deep discovery"
+            self.redraw_cb()
             active_entries = self._run_active_scan()
             if active_entries:
                 entries = self._merge_entries(entries, active_entries)
                 source = "nmap" if source == "none" else f"{source}+nmap"
                 self.last_active_scan_completed = time.monotonic()
 
+        entries = self._sort_entries(entries)
+        total_hosts = len(entries)
         with self.lock:
-            self.entries = self._sort_entries(entries)
+            self.scan_progress_current = 0
+            self.scan_progress_total = max(1, 1 + total_hosts)
+            self.scan_progress_label = f"Scanning services 0/{total_hosts}"
+        self.redraw_cb()
+
+        for idx, entry in enumerate(entries, start=1):
+            entry.services = self._scan_host_services(entry.ip)
+            with self.lock:
+                self.scan_progress_current = 1 + idx
+                self.scan_progress_total = max(1, 1 + total_hosts)
+                self.scan_progress_label = f"{entry.ip} {idx}/{total_hosts}"
+            self.redraw_cb()
+
+        with self.lock:
+            previous_ip = ""
+            if self.entries:
+                current = self._selected_entry()
+                if current is not None:
+                    previous_ip = current.ip
+            self.entries = entries
             self.selected_index = max(0, min(self.selected_index, len(self.entries) - 1))
+            if previous_ip:
+                for idx, item in enumerate(self.entries):
+                    if item.ip == previous_ip:
+                        self.selected_index = idx
+                        break
             self.last_error = "" if entries else "No local hosts discovered"
             self.local_ip = local_ip
             self.gateway = gateway
@@ -432,22 +530,38 @@ class LanternController:
             self.last_refresh_started = started
             self.last_refresh_completed = time.monotonic()
             self.last_refresh_duration_s = max(0.0, self.last_refresh_completed - started)
+            self.state = "detail" if self.entries else "idle"
+            self.scan_progress_current = self.scan_progress_total
+            self.scan_progress_label = "Complete"
         self.redraw_cb()
+        self._set_status(f"Lantern lit {len(entries)} hosts", 4.0 if entries else 5.0)
+
+    def refresh(self, force_active: bool = False) -> None:
+        self._start_scan()
 
     def tick(self, force: bool = False) -> None:
         with self.lock:
-            if self.menu_open:
+            if self.menu_open or self.state == "scanning":
                 return
-            stale = (time.monotonic() - self.last_refresh_completed) if self.last_refresh_completed else None
-        if force or stale is None or stale >= self.refresh_interval:
-            self.refresh(force_active=force)
+            current_ip = self.local_ip
+            current_gateway = self.gateway
+        next_ip = self._iface_ip()
+        next_gateway = self._gateway_ip()
+        if force or next_ip != current_ip or next_gateway != current_gateway:
+            with self.lock:
+                self.local_ip = next_ip
+                self.gateway = next_gateway
+                if self.last_source == "none":
+                    self.last_source = "passive"
+            self.redraw_cb()
+        return
 
     def move(self, delta: int) -> None:
         with self.lock:
             if self.menu_open:
                 items = self._menu_items()
                 self.menu_index = (self.menu_index + delta) % len(items)
-            elif self.entries:
+            elif self.state == "detail" and self.entries:
                 self.selected_index = max(0, min(self.selected_index + delta, len(self.entries) - 1))
             else:
                 return
@@ -455,6 +569,8 @@ class LanternController:
 
     def ok(self) -> None:
         with self.lock:
+            if self.state == "scanning":
+                return
             if not self.menu_open:
                 self.menu_open = True
                 self.menu_index = 0
@@ -464,26 +580,25 @@ class LanternController:
             self.menu_open = False
 
         choice = _clean(item, 32).lower()
-        if choice == "refresh data":
-            self.refresh(force_active=True)
-            self._set_status("Lantern refreshed", 4.0)
+        if choice in ("light the way", "refresh"):
+            self._start_scan()
             return
-        if choice == "clear cache":
+        if choice == "exit":
             with self.lock:
-                self.entries = []
-                self.selected_index = 0
-                self.last_error = ""
+                self.state = "idle"
             self.redraw_cb()
-            self._set_status("Lantern cache cleared", 4.0)
             return
         self.redraw_cb()
 
     def secondary(self) -> None:
-        self.refresh(force_active=True)
-        self._set_status("Lantern refreshed", 4.0)
+        self._start_scan()
 
     def back(self) -> bool:
         with self.lock:
+            if self.state == "detail" and not self.menu_open:
+                self.state = "idle"
+                self.redraw_cb()
+                return True
             if self.menu_open:
                 self.menu_open = False
                 self.redraw_cb()
@@ -492,21 +607,18 @@ class LanternController:
 
     def block_page_cycle(self) -> bool:
         with self.lock:
-            return self.menu_open
+            return self.menu_open or self.state == "scanning"
 
     def remote_action(self, action: str) -> bool:
         cmd = _clean(action, 32).lower()
         if cmd == "lantern_refresh":
-            self.secondary()
+            self._start_scan()
             return True
         if cmd == "lantern_clear":
             with self.lock:
-                self.entries = []
-                self.selected_index = 0
-                self.last_error = ""
                 self.menu_open = False
+                self.state = "idle"
             self.redraw_cb()
-            self._set_status("Lantern cache cleared", 4.0)
             return True
         return False
 
@@ -535,6 +647,7 @@ class LanternController:
                     "hostname": selected.hostname,
                     "vendor": selected.vendor,
                     "source": selected.source,
+                    "services": list(selected.services),
                 }
             return {
                 "state": self.state,
@@ -552,12 +665,16 @@ class LanternController:
                         "hostname": item.hostname,
                         "vendor": item.vendor,
                         "source": item.source,
+                        "services": list(item.services[:8]),
                     }
                     for item in self.entries[:24]
                 ],
                 "selected_host": selected_payload,
                 "local_ip": self.local_ip,
                 "gateway": self.gateway,
+                "scan_progress_current": self.scan_progress_current,
+                "scan_progress_total": self.scan_progress_total,
+                "scan_progress_label": self.scan_progress_label,
                 "last_error": self.last_error,
                 "last_source": self.last_source,
                 "last_refresh_age_s": None if not self.last_refresh_completed else max(0.0, time.monotonic() - self.last_refresh_completed),
@@ -580,39 +697,63 @@ class LanternController:
             rows: list[tuple[str, str, str, str]] = []
             selected = 0
             total = len(self.entries)
-            if total:
-                start = max(0, min(self.selected_index - 1, max(0, total - 3)))
-                visible = self.entries[start : start + 3]
-                for item in visible:
-                    rows.append(
-                        (
-                            self._display_name(item),
-                            _clean(item.ip, 15),
-                            _clean(item.mac, 17),
-                            self._state_label(item.state),
-                        )
-                    )
-                selected = self.selected_index - start
-            live_count = sum(1 for item in self.entries if item.state in ("reachable", "stale", "delay", "probe", "arp"))
-            lines = [
-                f"IFACE {self.iface.upper()}  IP {self.local_ip or 'n/a'}",
-                f"HOSTS {len(self.entries)}  LIVE {live_count}",
-                f"GW {self.gateway or 'n/a'}",
-                f"SRC {self.last_source.upper()}  LAST {self._age_text()}",
-            ]
-            selected_entry = self._selected_entry()
-            if selected_entry is not None:
-                lines.append(
-                    f"SEL {self._display_name(selected_entry)}"
-                )
-                lines.append(
-                    f"STATE {self._state_label(selected_entry.state)}"
-                )
-                lines.append(
-                    f"MAC {selected_entry.mac or '--'}"
-                )
-            elif self.last_error:
-                lines.append(self.last_error[:28])
+            live_count = sum(1 for item in self.entries if item.state in ("reachable", "stale", "delay", "probe", "arp", "live"))
+
+            if self.state == "scanning":
+                total_steps = max(1, int(self.scan_progress_total or 1))
+                current = max(0, min(int(self.scan_progress_current or 0), total_steps))
+                fill = max(0, min(12, int(round((current / total_steps) * 12))))
+                bar = "[" + ("#" * fill) + ("." * (12 - fill)) + "]"
+                lines = [
+                    "LIGHTING THE WAY",
+                    f"PROGRESS {current}/{total_steps}",
+                    bar,
+                    _clean(self.scan_progress_label, 32),
+                    f"IFACE {self.iface.upper()}",
+                    f"SELF {self.local_ip or 'n/a'}",
+                    f"GW {self.gateway or 'n/a'}",
+                ]
+            elif self.state == "detail" and total:
+                selected_entry = self._selected_entry()
+                lines = [
+                    f"{self.selected_index + 1}/{total}  {selected_entry.ip}",
+                    f"NAME {self._display_name(selected_entry)}",
+                    f"MAC {selected_entry.mac or '--'}",
+                    f"{self._state_label(selected_entry.state)} / {(_clean(selected_entry.vendor, 20) or 'n/a')}",
+                ]
+                if selected_entry.services:
+                    port_tokens: list[str] = []
+                    for raw in selected_entry.services:
+                        parts = raw.split()
+                        if not parts:
+                            continue
+                        service = parts[2] if len(parts) >= 3 else ""
+                        token = parts[0] if not service else f"{parts[0]}/{service}"
+                        port_tokens.append(_clean(token, 20))
+                    current_line = "PORTS "
+                    for token in port_tokens:
+                        candidate = token if current_line == "PORTS " else f"{current_line}, {token}"
+                        if len(candidate) <= 34:
+                            current_line = candidate
+                        else:
+                            lines.append(current_line)
+                            current_line = token
+                    if current_line:
+                        lines.append(current_line)
+                else:
+                    lines.append("PORTS none")
+            else:
+                lines = [
+                    f"IFACE {self.iface.upper()}  IP {self.local_ip or 'n/a'}",
+                    f"HOSTS {len(self.entries)}  LIVE {live_count}",
+                    f"GW {self.gateway or 'n/a'}",
+                    f"SRC {self.last_source.upper()}  LAST {self._age_text()}",
+                    "",
+                    "OK menu",
+                    "Light the Way",
+                ]
+                if self.last_error:
+                    lines.append(self.last_error[:28])
             return LanternView(
                 state=self.state,
                 menu_open=self.menu_open,
