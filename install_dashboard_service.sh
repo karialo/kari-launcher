@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SERVICE_NAME="kari-dashboard.service"
-SERVICE_DST="/etc/systemd/system/${SERVICE_NAME}"
+SERVICE_NAMES=("kari-bootscreen.service" "kari-dashboard.service")
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_SRC="${HERE}/systemd/${SERVICE_NAME}"
 RUN_USER="${SUDO_USER:-kali}"
 RUN_HOME="$(getent passwd "${RUN_USER}" | cut -d: -f6 || true)"
 if [[ -z "${RUN_HOME}" ]]; then
@@ -17,22 +15,30 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-if [[ ! -f "${SERVICE_SRC}" ]]; then
-  echo "Missing service template: ${SERVICE_SRC}"
-  exit 1
-fi
+for SERVICE_NAME in "${SERVICE_NAMES[@]}"; do
+  SERVICE_SRC="${HERE}/systemd/${SERVICE_NAME}"
+  SERVICE_DST="/etc/systemd/system/${SERVICE_NAME}"
+  if [[ ! -f "${SERVICE_SRC}" ]]; then
+    echo "Missing service template: ${SERVICE_SRC}"
+    exit 1
+  fi
 
-TMP_UNIT="$(mktemp)"
-sed \
-  -e "s#{{PROJECT_DIR}}#${HERE}#g" \
-  -e "s#{{DASH_CONFIG}}#${CFG_PATH}#g" \
-  "${SERVICE_SRC}" > "${TMP_UNIT}"
+  TMP_UNIT="$(mktemp)"
+  sed \
+    -e "s#{{PROJECT_DIR}}#${HERE}#g" \
+    -e "s#{{DASH_CONFIG}}#${CFG_PATH}#g" \
+    "${SERVICE_SRC}" > "${TMP_UNIT}"
 
-install -m 0644 "${TMP_UNIT}" "${SERVICE_DST}"
-rm -f "${TMP_UNIT}"
+  install -m 0644 "${TMP_UNIT}" "${SERVICE_DST}"
+  rm -f "${TMP_UNIT}"
+done
+
 systemctl daemon-reload
-systemctl enable --now "${SERVICE_NAME}"
+systemctl enable --now kari-bootscreen.service
+systemctl enable --now kari-dashboard.service
 
 echo
-echo "Installed and started ${SERVICE_NAME}"
-systemctl --no-pager --full status "${SERVICE_NAME}" || true
+echo "Installed and started kari-bootscreen.service and kari-dashboard.service"
+systemctl --no-pager --full status kari-bootscreen.service || true
+echo
+systemctl --no-pager --full status kari-dashboard.service || true

@@ -1,0 +1,18 @@
+[Unit]
+Description=KARI Early Boot Screen
+After=local-fs.target
+Before=network-online.target kari-dashboard.service
+Wants=local-fs.target
+ConditionPathExists={{PROJECT_DIR}}/booting.png
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory={{PROJECT_DIR}}
+Environment=PYTHONUNBUFFERED=1
+Environment=DHM_DASH_CONFIG={{DASH_CONFIG}}
+ExecStart={{PROJECT_DIR}}/bin/bootscreen
+
+[Install]
+WantedBy=multi-user.target

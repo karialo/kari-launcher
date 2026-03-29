@@ -542,6 +542,7 @@ Warnings:
 - if you force Kismet onto `wlan0`, you should expect to lose your management link
 - source policy depends on what exists at service start, especially Bluetooth
 - Kismet can coexist with admin/passive pages, but it still competes with other workflows that want to own the same capture radio
+- startup log warnings such as duplicate alert registration are not the same thing as live device detections
 
 ## FoxHunt
 
@@ -651,6 +652,7 @@ Warnings:
 - do not debug display porting and launcher handoff at the same time if you can avoid it
 - first make RaspyJack render correctly on your hardware
 - then wire in the launcher handoff
+- some RaspyJack payloads, especially Bluetooth-heavy ones like `WallOfFlippers`, depend on helper binaries and backend quirks outside the launcher's control
 
 ## AngryOxide
 
@@ -900,6 +902,21 @@ Current expected behavior on this build:
 - `wlan2` is auto-preferred when present
 - `hci0` is auto-added when present
 - `wlan0` is left alone
+
+### RaspyJack WallOfFlippers says bluepy failed
+
+Check:
+
+- `python3 -m pip show bluepy`
+- whether `bluepy-helper` exists and has the capabilities it needs
+- `systemctl is-active bluetooth`
+- whether RaspyJack falls back to `bluetoothctl`
+
+Current expected behavior on this build:
+
+- `WallOfFlippers` will try `bluepy` first
+- if `bluepy` runtime management commands keep failing, the payload should fall through to its `bluetoothctl` backend instead of looping forever
+- `bluetoothctl` fallback is good enough for basic nearby Bluetooth presence, but it is weaker than a healthy `bluepy` or `bleak` path
 
 ### A page feels sluggish
 

@@ -92,6 +92,7 @@ CONFIG_PATH = _resolve_config_path()
 ANGRYOXIDE_PID_PATH = Path("/tmp/portableops-angryoxide.pid")
 REMOTE_ACTION_LOG_PATH = Path("/tmp/portableops-remote-actions.log")
 SPLASH_FILENAME = "KARI.png"
+BOOTSCREEN_FILENAME = "booting.png"
 HIGH_IMPACT_ACTIONS = {
     "ao_toggle",
     "ao_monitor_on",
@@ -3018,9 +3019,20 @@ class DashboardApp:
         for i in range(0, len(swapped), 4096):
             self.display.st7789.data(swapped[i : i + 4096])
 
-    def _load_splash(self) -> pygame.Surface | None:
-        splash_path = Path(__file__).resolve().with_name(SPLASH_FILENAME)
-        if not splash_path.exists():
+    def _asset_path(self, filename: str) -> Path | None:
+        here = Path(__file__).resolve()
+        candidates = [
+            here.parents[2] / filename,
+            here.with_name(filename),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _load_image_canvas(self, filename: str) -> pygame.Surface | None:
+        splash_path = self._asset_path(filename)
+        if splash_path is None:
             return None
         try:
             raw = pygame.image.load(str(splash_path))
@@ -3049,11 +3061,26 @@ class DashboardApp:
         canvas.blit(scaled, ((sw - nw) // 2, (sh - nh) // 2))
         return canvas
 
+    def _load_splash(self) -> pygame.Surface | None:
+        return self._load_image_canvas(SPLASH_FILENAME)
+
+    def _load_bootscreen(self) -> pygame.Surface | None:
+        return self._load_image_canvas(BOOTSCREEN_FILENAME)
+
     def _draw_splash_frame(self, splash: pygame.Surface, alpha: int) -> None:
         self.screen.fill((0, 0, 0))
         frame = splash.copy()
         frame.set_alpha(clamp(alpha, 0, 255))
         self.screen.blit(frame, (0, 0))
+        self._update_display()
+
+    def _draw_crossfade_frame(self, from_surface: pygame.Surface, to_surface: pygame.Surface, alpha: int) -> None:
+        self.screen.fill((0, 0, 0))
+        base = from_surface.copy()
+        self.screen.blit(base, (0, 0))
+        top = to_surface.copy()
+        top.set_alpha(clamp(alpha, 0, 255))
+        self.screen.blit(top, (0, 0))
         self._update_display()
 
     def _handle_startup_events(self) -> None:
@@ -3064,9 +3091,14 @@ class DashboardApp:
                 self.running = False
 
     def _play_startup_splash(self) -> None:
+        booting = self._load_bootscreen()
         splash = self._load_splash()
-        self.screen.fill((0, 0, 0))
-        self._update_display()
+        if booting is not None:
+            self.screen.blit(booting, (0, 0))
+            self._update_display()
+        else:
+            self.screen.fill((0, 0, 0))
+            self._update_display()
         if splash is None:
             return
 
@@ -3086,8 +3118,26 @@ class DashboardApp:
             self._handle_startup_events()
             return self.running
 
-        if not phase(0.9, 0, 255):
-            return
+        def crossfade_phase(duration: float, from_surface: pygame.Surface, to_surface: pygame.Surface) -> bool:
+            start = time.monotonic()
+            while self.running:
+                t = (time.monotonic() - start) / max(duration, 0.001)
+                if t >= 1.0:
+                    break
+                alpha = int(255 * t)
+                self._draw_crossfade_frame(from_surface, to_surface, alpha)
+                self._handle_startup_events()
+                clock.tick(30)
+            self._draw_crossfade_frame(from_surface, to_surface, 255)
+            self._handle_startup_events()
+            return self.running
+
+        if booting is not None:
+            if not crossfade_phase(0.9, booting, splash):
+                return
+        else:
+            if not phase(0.9, 0, 255):
+                return
 
         hold_start = time.monotonic()
         while self.running and (time.monotonic() - hold_start) < 2.0:
