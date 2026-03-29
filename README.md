@@ -35,6 +35,7 @@ The launcher is supposed to be useful, not mystical. When it behaves well, it sh
 - [AngryOxide](#angryoxide)
 - [Remote Web UI](#remote-web-ui)
 - [Nodes and Status Boards](#nodes-and-status-boards)
+- [Upstream Projects](#upstream-projects)
 - [RaspyJack Patch Bundle](#raspyjack-patch-bundle)
 - [Watchdog](#watchdog)
 - [Troubleshooting](#troubleshooting)
@@ -750,6 +751,57 @@ Tutorial:
 5. add HTTP or SMB checks only after the basic probe works
 
 The launcher is much happier when you teach it your world instead of making it pretend it already knows it.
+
+## Upstream Projects
+
+K.A.R.I Launcher does not exist in a vacuum. Several pages in this project are wrappers, handoff layers, or integration surfaces for other projects built by other people, and they deserve to be credited clearly.
+
+### Kismet
+
+- Upstream: <https://github.com/kismetwireless/kismet>
+- Official project: <https://www.kismetwireless.net>
+- Primary developer / long-time maintainer: Mike Kershaw (`dragorn`)
+
+Why it matters here:
+
+- the `Kismet` launcher page is a control and status layer around a separately installed Kismet service
+- the launcher-side `wlan2` / Bluetooth autostart policy is our integration logic, not Kismet's upstream default behavior
+
+If you use the `Kismet` page, read the upstream Kismet docs too. They know more about Kismet than this launcher ever will, and pretending otherwise would be a very silly hobby.
+
+### RaspyJack
+
+- Upstream: <https://github.com/7h30th3r0n3/Raspyjack>
+- Developer: `7h30th3r0n3`
+
+Why it matters here:
+
+- the `RaspyJack` launcher page only manages the handoff into a separately installed RaspyJack stack
+- the display patch bundle in this repository is a narrow adaptation for the 1.3in panel plus launcher-return behavior, not a replacement for RaspyJack itself
+
+Special thanks are due here because the launcher integration only exists at all because RaspyJack existed first.
+
+### AngryOxide
+
+- Upstream: <https://github.com/Ragnt/AngryOxide>
+- Developer: `Ragnt`
+
+Why it matters here:
+
+- the `AngryOxide` page in the launcher is a management surface around an external project
+- launcher-side status parsing, target selection, and UI integration are our glue, but the actual tool and its behavior belong to the upstream project
+
+If you are using AngryOxide through the launcher, you should still read the upstream guide and understand what the tool itself expects.
+
+### General Rule
+
+If a page in this launcher wraps another project:
+
+- install and validate that upstream project separately first
+- read its own documentation
+- then wire it into K.A.R.I Launcher
+
+The launcher is the conductor. It is not the orchestra.
 
 ## RaspyJack Patch Bundle
 
