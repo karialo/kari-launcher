@@ -69,11 +69,22 @@ root = os.environ["RASPYJACK_ROOT"]
 sys.path.insert(0, root)
 import LCD_1in44  # type: ignore
 
+rj_lcd = os.environ.get("RJ_LCD", "").strip().lower()
+panel_w = int(os.environ.get("RJ_PANEL_WIDTH", "0") or 0)
+panel_h = int(os.environ.get("RJ_PANEL_HEIGHT", "0") or 0)
+if panel_w <= 0 or panel_h <= 0:
+    if rj_lcd == "st7789":
+        panel_w = 240
+        panel_h = 240
+    else:
+        panel_w = 128
+        panel_h = 128
+
 lcd = LCD_1in44.LCD()
-lcd.width = 240
-lcd.height = 240
+lcd.width = panel_w
+lcd.height = panel_h
 lcd.LCD_Init(LCD_1in44.SCAN_DIR_DFT)
-img = Image.new("RGB", (240, 240), (0, 0, 0))
+img = Image.new("RGB", (panel_w, panel_h), (0, 0, 0))
 lcd.LCD_ShowImage(img, 0, 0)
 PY3
 

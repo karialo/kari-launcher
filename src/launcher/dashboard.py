@@ -69,6 +69,7 @@ from .lantern import LanternController
 from .ops_pages import KismetController, NmapController, SocketWatchController, TrafficViewController
 from .theme import THEMES, Theme, load_theme_name_from_env, next_theme_name
 from .ui_primitives import GlowCache, PanelStyle, TextRenderer, draw_panel, draw_status_dot
+from .waveshare_1in44 import Waveshare144Display
 from .wifite_prep import WifitePrepController
 
 
@@ -189,6 +190,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "smb_deep_stats_enabled": False,
     "smb_detail_refresh_seconds": 60,
     "hardware": {
+        "panel": "waveshare_1in3",
+        "ui_profile": "standard240",
         "backend": "auto",
         "rotation": 90,
         "invert": True,
@@ -228,30 +231,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "takes_over_display": True,
         }
     },
-    "nodes": [
-        {
-            "name": "PiTemplar",
-            "host": "pitemplar.tailnet.ts.net",
-            "ports": [22, 8080],
-            "health_url": "",
-            "health_json_path": "",
-            "health_expect": "",
-            "smb": {
-                "host": "pitemplar.tailnet.ts.net",
-                "share": "private",
-                "username": "",
-                "password": "",
-            },
-        },
-        {
-            "name": "Bjorn",
-            "host": "bjorn.tailnet.ts.net",
-            "ports": [22, 8000],
-            "health_url": "",
-            "health_json_path": "",
-            "health_expect": "",
-        },
-    ],
+    "nodes": [],
     "raspyjack": {
         "service_names": [
             "raspyjack.service",
@@ -345,7 +325,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "network_ops": {
         "primary_iface": "wlan0",
         "monitor_iface": "wlan1",
-        "wifi_profile": "VM8248525",
+        "wifi_profile": "",
         "networkmanager_service": "NetworkManager.service",
         "tailscale_service": "tailscaled.service",
         "reboot_cmd": "systemctl reboot",
@@ -2543,10 +2523,14 @@ class DashboardApp:
         self.display = None
         self.input_backend: WaveshareInput | None = None
         self.hardware_backend = "preview"
+        self.display_panel = "preview"
+        self.ui_profile = "standard240"
         if not self.preview_mode:
             hw_cfg = self.config.get("hardware", {}) if isinstance(self.config.get("hardware"), dict) else {}
             input_cfg = self.config.get("input", {}) if isinstance(self.config.get("input"), dict) else {}
             requested_backend = clean_text(hw_cfg.get("backend", "auto"), 24).lower() or "auto"
+            self.display_panel = clean_text(hw_cfg.get("panel", requested_backend), 32).lower() or requested_backend
+            self.ui_profile = clean_text(hw_cfg.get("ui_profile", "standard240"), 32).lower() or "standard240"
 
             if requested_backend in ("auto", "waveshare", "waveshare_1in3", "st7789"):
                 if st7789 is not None:
@@ -2566,6 +2550,23 @@ class DashboardApp:
                     )
                     self.input_backend.init()
                     self.hardware_backend = "waveshare"
+            elif requested_backend in ("waveshare_1in44", "st7735", "waveshare_144"):
+                self.display = Waveshare144Display(
+                    spi_port=int(hw_cfg.get("spi_port", 0)),
+                    spi_cs=int(hw_cfg.get("spi_cs", 0)),
+                    dc_pin=int(hw_cfg.get("dc_pin", 25)),
+                    rst_pin=int(hw_cfg.get("rst_pin", 27)),
+                    backlight_pin=int(hw_cfg.get("backlight_pin", 24)),
+                    rotation=int(hw_cfg.get("rotation", 0)),
+                    invert=bool(hw_cfg.get("invert", False)),
+                    spi_speed_hz=int(hw_cfg.get("spi_speed_hz", 9000000)),
+                )
+                self.input_backend = WaveshareInput(
+                    pins=input_cfg.get("pins", {}),
+                    debounce_seconds=float(input_cfg.get("debounce_seconds", 0.10)),
+                )
+                self.input_backend.init()
+                self.hardware_backend = "waveshare"
 
             if self.display is None:
                 if DisplayHATMini is None:

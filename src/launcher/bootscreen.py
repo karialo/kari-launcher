@@ -11,6 +11,7 @@ import pygame
 from PIL import Image
 
 from .dashboard import CONFIG_PATH, DisplayHATMini, WaveshareDisplay, ensure_config
+from .waveshare_1in44 import Waveshare144Display
 
 BOOTSCREEN_FILENAME = "booting.png"
 
@@ -69,6 +70,21 @@ def _build_display(config: dict) -> tuple[object | None, str, tuple[int, int]]:
                 rotation=int(hw.get("rotation", 90)),
                 invert=bool(hw.get("invert", True)),
                 spi_speed_hz=int(hw.get("spi_speed_hz", 24_000_000)),
+            )
+            backend = "waveshare"
+        except Exception:
+            display = None
+    elif requested_backend in ("waveshare_1in44", "st7735", "waveshare_144"):
+        try:
+            display = Waveshare144Display(
+                spi_port=int(hw.get("spi_port", 0)),
+                spi_cs=int(hw.get("spi_cs", 0)),
+                dc_pin=int(hw.get("dc_pin", 25)),
+                rst_pin=int(hw.get("rst_pin", 27)),
+                backlight_pin=int(hw.get("backlight_pin", 24)),
+                rotation=int(hw.get("rotation", 0)),
+                invert=bool(hw.get("invert", False)),
+                spi_speed_hz=int(hw.get("spi_speed_hz", 9_000_000)),
             )
             backend = "waveshare"
         except Exception:

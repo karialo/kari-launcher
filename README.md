@@ -1,6 +1,6 @@
 # K.A.R.I Launcher
 
-K.A.R.I Launcher is a field dashboard and control surface for a Raspberry Pi with a Waveshare 1.3in 240x240 display, a joystick, and three front buttons. It gives you a local device UI, a remote web mirror, module-specific workflows, service control, and a cleaner way to keep a small operations box honest.
+K.A.R.I Launcher is a field dashboard and control surface for a Raspberry Pi with a small Waveshare display, a joystick, and three front buttons. It gives you a local device UI, a remote web mirror, module-specific workflows, service control, and a cleaner way to keep a small operations box honest.
 
 This repository is the launcher, not a toy UI demo and not a generic kiosk sample. It sits in the middle of displays, services, radios, helper scripts, and whatever else you wire into it. Treat it like a real tool:
 
@@ -47,15 +47,22 @@ The launcher is supposed to be useful, not mystical. When it behaves well, it sh
 
 Current hardware target:
 
-- Waveshare 1.3in LCD
-- 240x240 resolution
+- Waveshare 1.3in LCD, `240x240`, tuned and preferred
+- Waveshare 1.44in LCD, `128x128`, supported as a scaled compatibility path
 - 5-way joystick: `UP`, `DOWN`, `LEFT`, `RIGHT`, `OK`
 - front buttons: `KEY1`, `KEY2`, `KEY3`
 - optional PiSugar telemetry
 
-Default input pin mapping lives in [dashboard.py](/home/kari/Projects/kari-launcher/src/launcher/dashboard.py).
+Default input pin mapping lives in [dashboard.py](./src/launcher/dashboard.py).
 
 The old `A / B / X / Y` language belongs to the earlier DisplayHAT Mini era. The physical unit this launcher is built around is joystick plus three front keys. Some internal compatibility aliases still use older names, but the handheld control model is not that board anymore.
+
+Practical reality:
+
+- the launcher UI is authored around the `1.3in` `240x240` build
+- the `1.44in` path now has its own launcher backend, but it scales the current UI down onto `128x128`
+- that makes the `1.44in` route usable for compatibility, not the nicest K.A.R.I experience
+- RaspyJack is still the happier native fit for the `1.44in` panel
 
 ## Current Page Set
 
@@ -108,6 +115,7 @@ kari-launcher/
 ├─ third_party/
 │  └─ raspyjack_patch/
 ├─ install_dashboard_service.sh
+├─ DIYinstall.sh
 ├─ uninstall_dashboard_service.sh
 ├─ install_watchdog_service.sh
 ├─ uninstall_watchdog_service.sh
@@ -221,6 +229,26 @@ Nothing in this launcher is married to Kali. Kali just happened to be the box on
 
 If somebody wants the barebones route on Raspberry Pi OS, that is a perfectly sensible choice. The launcher itself is just Python, systemd units, GPIO/display handling, a small web server, and whatever external tools you choose to bolt onto it. The part that needs care is not "can it run on Raspberry Pi OS?" The part that needs care is "did you wire your own services, interfaces, and helper paths honestly?"
 
+If you want the guided route after flashing Raspberry Pi OS, there is now a bootstrap wizard:
+
+```bash
+cd ~/Projects/kari-launcher
+./DIYinstall.sh
+```
+
+What it handles:
+
+- apt prerequisites
+- launcher venv creation
+- first-run config generation
+- display selection: `1.3in` or `1.44in`
+- `wlan0` maintenance Wi-Fi setup through `nmcli`
+- optional RaspyJack / AngryOxide / Kismet upstream clones
+- optional Kismet package install plus launcher-side source policy
+- optional RaspyJack `1.3in` patch application
+- optional RaspyJack service disable and launcher-return override
+- launcher and watchdog service installation
+
 ### 1. Start with a sane Pi
 
 Use a current Raspberry Pi OS image and do the boring foundations first:
@@ -231,7 +259,7 @@ sudo raspi-config
 
 Enable:
 
-- `SPI` for the ST7789 display
+- `SPI` for the Waveshare display path (`ST7789` on `1.3in`, `ST7735` on `1.44in`)
 - `I2C` only if your own build needs it
 - `SSH` if you want to manage the box remotely
 
@@ -271,7 +299,7 @@ python -m pip install --upgrade pip wheel setuptools
 python -m pip install -r requirements.txt
 ```
 
-Current Python package set in [requirements.txt](/home/kari/Projects/kari-launcher/requirements.txt):
+Current Python package set in [requirements.txt](./requirements.txt):
 
 - `Pillow`
 - `pygame`
@@ -289,6 +317,31 @@ Why those matter:
 - `displayhatmini` stays in the list because the code still supports that older backend for compatibility
 
 If you skip the venv and rely on whatever your distro Python happens to have lying around, you are volunteering for a class of bugs that do not deserve your loyalty.
+
+### Display choice matters
+
+If you are wiring the box by hand instead of using `./DIYinstall.sh`, set the hardware backend deliberately:
+
+- `waveshare_1in3` for the `240x240` ST7789 panel
+- `waveshare_1in44` for the `128x128` ST7735 panel
+
+The `1.3in` path is the intended launcher build. The `1.44in` path is a compatibility route that scales the current launcher UI down to fit.
+
+The launcher is now display-aware at config level:
+
+- `hardware.panel` records the selected panel family
+- `hardware.ui_profile` records the intended UI profile
+
+Right now that awareness is used to make the install/config honest. It is not yet a full alternate `128x128` menu system.
+
+If someone wants to turn the `1.44in` path from "works" into "actually feels designed", the work is not in the SPI driver. The work is in the UI layer:
+
+- redesign the card/menu geometry for `128x128`
+- retune font sizes, row counts, and footer hints for that smaller canvas
+- stop relying on the current `240x240` card proportions and then scaling them down
+- audit every page with long lists or multi-line summaries
+
+In other words: the current `1.44in` support is display-aware and honest, but it is not yet a dedicated `128x128` UX pass.
 
 ### 3. Run it once and let it write the real config
 
@@ -329,6 +382,7 @@ This matters more than the package list.
 - one external adapter is usually your monitor or capture radio
 - Kismet, FoxHunt, Wifite, AngryOxide, and RaspyJack can all fight over radios if you let them
 - the launcher will happily run with bad assumptions if you feed it bad assumptions
+- if RaspyJack is installed as services, disable them at boot unless you deliberately want it grabbing the display before K.A.R.I starts
 
 Do not carry our interface names forward just because they worked on our box. Pick your own ownership model and write it down in config.
 
@@ -348,8 +402,8 @@ Minimal Raspberry Pi OS-flavoured example:
   "managed_apps": {
     "raspyjack": {
       "label": "RaspyJack",
-      "start_cmd": "/home/pi/Projects/kari-launcher/start_raspyjack.sh",
-      "stop_cmd": "/home/pi/Projects/kari-launcher/stop_raspyjack.sh",
+      "start_cmd": "/home/<user>/Projects/kari-launcher/start_raspyjack.sh",
+      "stop_cmd": "/home/<user>/Projects/kari-launcher/stop_raspyjack.sh",
       "status_cmd": "systemctl is-active raspyjack.service raspyjack-device.service raspyjack-webui.service",
       "takes_over_display": true
     }
@@ -366,16 +420,16 @@ Minimal Raspberry Pi OS-flavoured example:
     ],
     "webui_host": "127.0.0.1",
     "webui_port": 8080,
-    "loot_path": "/home/pi/Projects/Raspyjack/loot",
+    "loot_path": "/home/<user>/Projects/Raspyjack/loot",
     "primary_interface": "wlan0",
     "monitor_interface": "wlan1"
   },
   "angryoxide": {
     "interface": "wlan1",
     "start_monitor_cmd": "airmon-ng start wlan1",
-    "command": "/home/pi/bin/angryoxide -i wlan1",
-    "log_path": "/home/pi/Results/angryoxide-live.log",
-    "results_dir": "/home/pi/Results",
+    "command": "/home/<user>/bin/angryoxide -i wlan1",
+    "log_path": "/home/<user>/Results/angryoxide-live.log",
+    "results_dir": "/home/<user>/Results",
     "results_prefix": "oxide"
   },
   "kismet": {
@@ -384,7 +438,7 @@ Minimal Raspberry Pi OS-flavoured example:
     "networkmanager_service": "NetworkManager.service",
     "webui_host": "127.0.0.1",
     "webui_port": 2501,
-    "capture_dirs": ["/var/log/kismet", "/home/pi/kismet"]
+    "capture_dirs": ["/var/log/kismet", "/home/<user>/kismet"]
   }
 }
 ```
@@ -419,7 +473,7 @@ What that helper currently does:
 - auto-prefers `wlan2` for passive Wi-Fi capture when it exists
 - otherwise leaves Wi-Fi capture manual instead of silently stealing `wlan1`
 
-If your box uses different interface names, edit [kismet-source-autoconfig.sh](/home/kari/Projects/kari-launcher/scripts/kismet-source-autoconfig.sh). Do not keep our `wlan2` policy on your machine out of nostalgia.
+If your box uses different interface names, edit [kismet-source-autoconfig.sh](./scripts/kismet-source-autoconfig.sh). Do not keep our `wlan2` policy on your machine out of nostalgia.
 
 Then confirm the launcher config matches reality:
 
@@ -464,7 +518,7 @@ Then do the launcher part:
 
 1. Get RaspyJack working on Raspberry Pi OS by itself.
 2. Make sure it does not auto-start and steal the display before K.A.R.I is ready.
-3. Adapt [start_raspyjack.sh](/home/kari/Projects/kari-launcher/start_raspyjack.sh) and [stop_raspyjack.sh](/home/kari/Projects/kari-launcher/stop_raspyjack.sh) for your install.
+3. Adapt [start_raspyjack.sh](./start_raspyjack.sh) and [stop_raspyjack.sh](./stop_raspyjack.sh) for your install.
 4. Point `managed_apps.raspyjack.start_cmd` and `managed_apps.raspyjack.stop_cmd` at those wrappers.
 5. Set `raspyjack.service_names`, `raspyjack.webui_service_names`, `raspyjack.webui_host`, `raspyjack.webui_port`, and `raspyjack.loot_path` to your real layout.
 
@@ -476,7 +530,21 @@ Why wrappers matter:
 
 If your RaspyJack install is not service-based, replace the `systemctl` calls in the wrappers with direct launch and shutdown commands. The launcher does not care whether the handoff target is a service or a script. It cares whether the handoff is clean.
 
-If you need the 1.3in panel adaptation and return hook, inspect [third_party/raspyjack_patch](/home/kari/Projects/kari-launcher/third_party/raspyjack_patch). It is a narrow patch bundle, not a claim that we have somehow become RaspyJack headquarters.
+If you need the 1.3in panel adaptation and return hook, inspect [third_party/raspyjack_patch](./third_party/raspyjack_patch). It is a narrow patch bundle, not a claim that we have somehow become RaspyJack headquarters.
+
+Panel rule:
+
+- `1.44in` RaspyJack is the upstream/native baseline, so there is no special K.A.R.I patch bundle you must apply just to keep it on that panel
+- `1.3in` RaspyJack is the patched path, because that is where the ST7789 bridge, compatibility driver, and launcher-return hook matter
+
+For a service-based RaspyJack install, the sane default is:
+
+```bash
+sudo systemctl stop raspyjack.service raspyjack-device.service raspyjack-webui.service
+sudo systemctl disable raspyjack.service raspyjack-device.service raspyjack-webui.service
+```
+
+That is not hostility toward RaspyJack. It is just the cleanest way to stop two different display-owning stacks from both deciding they are in charge at boot.
 
 ### 8. Install the launcher service
 
@@ -492,6 +560,8 @@ That installs and enables:
 - `kari-dashboard.service`
 
 It also installs `termie.service` as part of the same service bundle so the launcher-managed handoff target is present when you choose to use it.
+
+`Termie` is the launcher's shell/log handoff target: a full-screen terminal-style view intended for cases where a tool needs to drop out of the menu and show live command output locally. That workflow currently depends on a small local alias/site-specific setup in our own environment, so treat it as `coming soon` rather than part of the committed DIY path for other users.
 
 Useful checks:
 
@@ -836,8 +906,8 @@ This is important, because confusion here is expensive:
 
 That behavior is implemented by:
 
-- [kismet-source-autoconfig.sh](/home/kari/Projects/kari-launcher/scripts/kismet-source-autoconfig.sh)
-- [kismet.service.override.conf](/home/kari/Projects/kari-launcher/scripts/kismet.service.override.conf)
+- [kismet-source-autoconfig.sh](./scripts/kismet-source-autoconfig.sh)
+- [kismet.service.override.conf](./scripts/kismet.service.override.conf)
 
 Tutorial:
 
@@ -953,8 +1023,8 @@ What it expects:
 
 Defaults:
 
-- [start_raspyjack.sh](/home/kari/Projects/kari-launcher/start_raspyjack.sh)
-- [stop_raspyjack.sh](/home/kari/Projects/kari-launcher/stop_raspyjack.sh)
+- [start_raspyjack.sh](./start_raspyjack.sh)
+- [stop_raspyjack.sh](./stop_raspyjack.sh)
 
 Tutorial:
 
@@ -1136,10 +1206,10 @@ What happens:
 
 Files involved:
 
-- [booting.png](/home/kari/Projects/kari-launcher/booting.png)
-- [bootscreen.py](/home/kari/Projects/kari-launcher/src/launcher/bootscreen.py)
-- [bootscreen](/home/kari/Projects/kari-launcher/bin/bootscreen)
-- [kari-bootscreen.service](/home/kari/Projects/kari-launcher/systemd/kari-bootscreen.service)
+- [booting.png](./booting.png)
+- [bootscreen.py](./src/launcher/bootscreen.py)
+- [bootscreen](./bin/bootscreen)
+- [kari-bootscreen.service](./systemd/kari-bootscreen.service)
 
 Tutorial:
 
@@ -1159,7 +1229,7 @@ Warnings:
 
 The small RaspyJack patch bundle in:
 
-- [third_party/raspyjack_patch](/home/kari/Projects/kari-launcher/third_party/raspyjack_patch)
+- [third_party/raspyjack_patch](./third_party/raspyjack_patch)
 
 contains only the changes we could defend publicly as part of the 1.3in/ST7789 adaptation plus the optional `Return to Launcher` hook.
 
@@ -1170,6 +1240,11 @@ Use it when:
 - you need the 1.3in display port
 - you need the launcher return hook
 - you want a narrower public patch set instead of a giant hand-wavy fork
+
+Replication rule:
+
+- on a stock `1.44in` RaspyJack build, keep upstream files as they are
+- on a `1.3in` RaspyJack build, apply the patch bundle and use the ST7789 backend/env it documents
 
 ## Watchdog
 

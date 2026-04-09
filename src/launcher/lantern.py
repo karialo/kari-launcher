@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import shutil
 import subprocess
 import threading
@@ -10,6 +11,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .foxhunt import _clean
+
+
+def _local_host_label() -> str:
+    try:
+        host = socket.gethostname().strip()
+    except Exception:
+        host = ""
+    return _short_name(host, 18) or "local"
 
 
 def _fmt_age(seconds: float | None) -> str:
@@ -147,7 +156,7 @@ class LanternController:
         if ip == self.gateway and self.gateway:
             return "gateway"
         if ip == self.local_ip and self.local_ip:
-            return "kari"
+            return _local_host_label()
         if self.tool_avahi and Path(self.tool_avahi).exists():
             try:
                 result = subprocess.run(
@@ -197,7 +206,7 @@ class LanternController:
         if item.ip == self.gateway and self.gateway:
             return "gateway"
         if item.ip == self.local_ip and self.local_ip:
-            return "kari"
+            return _local_host_label()
         if item.vendor:
             vendor = item.vendor
             for suffix in (" Technologies", " Limited", " BV", " A.S.", " Inc.", " LLC"):
