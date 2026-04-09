@@ -19,6 +19,7 @@ The launcher is supposed to be useful, not mystical. When it behaves well, it sh
 - [Repository Layout](#repository-layout)
 - [Controls](#controls)
 - [Installation](#installation)
+- [DIY Build on Raspberry Pi OS](#diy-build-on-raspberry-pi-os)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Page Guide](#page-guide)
@@ -69,6 +70,7 @@ The launcher currently ships with these user-facing pages:
 - `Kismet`: passive capture status, source reporting, device browse, FoxHunt handoff
 - `FoxHunt`: target selection, target lock, hunt flow, session saves
 - `Wifite`: passive target staging plus a generic configurable command runner
+- `Pika`: generic launcher-managed handoff slot for a second full-screen app
 - `RaspyJack`: launcher-managed handoff into a separate full-screen stack
 - `AngryOxide`: run status, logs, target selection, workflow control
 
@@ -207,10 +209,314 @@ sudo ./install_dashboard_service.sh
 Useful commands:
 
 ```bash
+sudo systemctl status kari-bootscreen.service
 sudo systemctl status kari-dashboard.service
 sudo journalctl -u kari-dashboard.service -f
 sudo systemctl restart kari-dashboard.service
 ```
+
+## DIY Build on Raspberry Pi OS
+
+Nothing in this launcher is married to Kali. Kali just happened to be the box on the bench when a lot of the defaults were first written down.
+
+If somebody wants the barebones route on Raspberry Pi OS, that is a perfectly sensible choice. The launcher itself is just Python, systemd units, GPIO/display handling, a small web server, and whatever external tools you choose to bolt onto it. The part that needs care is not "can it run on Raspberry Pi OS?" The part that needs care is "did you wire your own services, interfaces, and helper paths honestly?"
+
+### 1. Start with a sane Pi
+
+Use a current Raspberry Pi OS image and do the boring foundations first:
+
+```bash
+sudo raspi-config
+```
+
+Enable:
+
+- `SPI` for the ST7789 display
+- `I2C` only if your own build needs it
+- `SSH` if you want to manage the box remotely
+
+Then bring the base system up to date and install the pieces the launcher expects to find:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  git \
+  python3 \
+  python3-pip \
+  python3-venv \
+  python3-dev \
+  build-essential \
+  python3-setuptools \
+  python3-wheel \
+  network-manager \
+  curl \
+  util-linux
+```
+
+Notes:
+
+- `util-linux` matters because the launcher uses `script(1)` when starting `AngryOxide` so PTY-hungry tools behave less badly under systemd.
+- If your Raspberry Pi OS release has to build `Pillow` or `pygame` from source instead of pulling wheels, install the matching image and SDL development headers for that release before blaming Python for your afternoon.
+
+### 2. Clone the repo and build the venv
+
+```bash
+mkdir -p ~/Projects
+cd ~/Projects
+git clone <your-repo-url> kari-launcher
+cd ~/Projects/kari-launcher
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip wheel setuptools
+python -m pip install -r requirements.txt
+```
+
+Current Python package set in [requirements.txt](/home/kari/Projects/kari-launcher/requirements.txt):
+
+- `Pillow`
+- `pygame`
+- `RPi.GPIO`
+- `spidev`
+- `numpy`
+- `st7789`
+- `displayhatmini`
+
+Why those matter:
+
+- `Pillow` and `pygame` are the rendering stack
+- `RPi.GPIO`, `spidev`, and `st7789` are the physical-panel and button path
+- `numpy` is used by the display path when the ST7789 backend is active
+- `displayhatmini` stays in the list because the code still supports that older backend for compatibility
+
+If you skip the venv and rely on whatever your distro Python happens to have lying around, you are volunteering for a class of bugs that do not deserve your loyalty.
+
+### 3. Run it once and let it write the real config
+
+```bash
+./bin/dashboard
+```
+
+First run creates:
+
+```text
+~/.config/launcher/dashboard.json
+```
+
+That file is not optional decoration. It is the live contract between your hardware, your services, and the launcher.
+
+At minimum, review these blocks before you install any service:
+
+- `hardware`
+- `input`
+- `network_ops`
+- `managed_apps`
+- `raspyjack`
+- `angryoxide`
+- `kismet`
+- `remote`
+
+For a real joystick-plus-three-keys handheld, make sure this is true:
+
+```json
+"local_buttons_enabled": true
+```
+
+### 4. Understand the launcher's ownership model
+
+This matters more than the package list.
+
+- `wlan0` is usually your management link
+- one external adapter is usually your monitor or capture radio
+- Kismet, FoxHunt, Wifite, AngryOxide, and RaspyJack can all fight over radios if you let them
+- the launcher will happily run with bad assumptions if you feed it bad assumptions
+
+Do not carry our interface names forward just because they worked on our box. Pick your own ownership model and write it down in config.
+
+Minimal Raspberry Pi OS-flavoured example:
+
+```json
+{
+  "local_buttons_enabled": true,
+  "network_ops": {
+    "primary_iface": "wlan0",
+    "monitor_iface": "wlan1",
+    "wifi_profile": "YourSSID",
+    "networkmanager_service": "NetworkManager.service",
+    "tailscale_service": "tailscaled.service",
+    "reboot_cmd": "systemctl reboot"
+  },
+  "managed_apps": {
+    "raspyjack": {
+      "label": "RaspyJack",
+      "start_cmd": "/home/pi/Projects/kari-launcher/start_raspyjack.sh",
+      "stop_cmd": "/home/pi/Projects/kari-launcher/stop_raspyjack.sh",
+      "status_cmd": "systemctl is-active raspyjack.service raspyjack-device.service raspyjack-webui.service",
+      "takes_over_display": true
+    }
+  },
+  "raspyjack": {
+    "service_names": [
+      "raspyjack.service",
+      "raspyjack-device.service",
+      "raspyjack-webui.service"
+    ],
+    "webui_service_names": [
+      "raspyjack-webui.service",
+      "caddy.service"
+    ],
+    "webui_host": "127.0.0.1",
+    "webui_port": 8080,
+    "loot_path": "/home/pi/Projects/Raspyjack/loot",
+    "primary_interface": "wlan0",
+    "monitor_interface": "wlan1"
+  },
+  "angryoxide": {
+    "interface": "wlan1",
+    "start_monitor_cmd": "airmon-ng start wlan1",
+    "command": "/home/pi/bin/angryoxide -i wlan1",
+    "log_path": "/home/pi/Results/angryoxide-live.log",
+    "results_dir": "/home/pi/Results",
+    "results_prefix": "oxide"
+  },
+  "kismet": {
+    "service_names": ["kismet.service"],
+    "primary_interface": "wlan0",
+    "networkmanager_service": "NetworkManager.service",
+    "webui_host": "127.0.0.1",
+    "webui_port": 2501,
+    "capture_dirs": ["/var/log/kismet", "/home/pi/kismet"]
+  }
+}
+```
+
+Use that as a shape reference, not a sacred text.
+
+### 5. Plumb Kismet into the launcher
+
+Read the upstream docs first:
+
+- <https://www.kismetwireless.net/docs/readme/>
+- <https://github.com/kismetwireless/kismet>
+
+Then do the launcher-specific wiring:
+
+1. Install Kismet and make sure `kismet.service` works by itself before the launcher gets involved.
+2. Decide which interface Kismet is allowed to own.
+3. Install the launcher helper script and service override:
+
+```bash
+sudo install -m 0755 scripts/kismet-source-autoconfig.sh /usr/local/bin/kismet-source-autoconfig.sh
+sudo install -d /etc/systemd/system/kismet.service.d
+sudo install -m 0644 scripts/kismet.service.override.conf /etc/systemd/system/kismet.service.d/override.conf
+sudo systemctl daemon-reload
+sudo systemctl restart kismet.service
+```
+
+What that helper currently does:
+
+- leaves `wlan0` alone
+- auto-adds `hci0` only when Bluetooth exists at service start
+- auto-prefers `wlan2` for passive Wi-Fi capture when it exists
+- otherwise leaves Wi-Fi capture manual instead of silently stealing `wlan1`
+
+If your box uses different interface names, edit [kismet-source-autoconfig.sh](/home/kari/Projects/kari-launcher/scripts/kismet-source-autoconfig.sh). Do not keep our `wlan2` policy on your machine out of nostalgia.
+
+Then confirm the launcher config matches reality:
+
+- `kismet.service_names`
+- `kismet.webui_host`
+- `kismet.webui_port`
+- `kismet.capture_dirs`
+- `kismet.networkmanager_service`
+
+### 6. Plumb AngryOxide into the launcher
+
+Read the upstream project first:
+
+- <https://github.com/Ragnt/AngryOxide>
+
+Then wire it honestly:
+
+1. Install `angryoxide` somewhere stable.
+2. Run it manually once, outside the launcher, and confirm your chosen adapter, result directory, and log path are correct.
+3. Point the launcher at the real binary, not a wish:
+
+- `angryoxide.command`
+- `angryoxide.interface`
+- `angryoxide.log_path`
+- `angryoxide.results_dir`
+- `angryoxide.results_prefix`
+
+4. If your adapter needs an explicit monitor-mode command, set `angryoxide.start_monitor_cmd` to whatever actually works on your distro and driver stack.
+
+Practical note:
+
+- the launcher wraps AngryOxide through `script(1)` so the process gets a PTY under service control
+- if your build uses a different binary name, wrapper script, or working directory, reflect that in the config instead of expecting autodetection to save you
+
+### 7. Plumb RaspyJack into the launcher
+
+Read upstream first:
+
+- <https://github.com/7h30th3r0n3/Raspyjack>
+
+Then do the launcher part:
+
+1. Get RaspyJack working on Raspberry Pi OS by itself.
+2. Make sure it does not auto-start and steal the display before K.A.R.I is ready.
+3. Adapt [start_raspyjack.sh](/home/kari/Projects/kari-launcher/start_raspyjack.sh) and [stop_raspyjack.sh](/home/kari/Projects/kari-launcher/stop_raspyjack.sh) for your install.
+4. Point `managed_apps.raspyjack.start_cmd` and `managed_apps.raspyjack.stop_cmd` at those wrappers.
+5. Set `raspyjack.service_names`, `raspyjack.webui_service_names`, `raspyjack.webui_host`, `raspyjack.webui_port`, and `raspyjack.loot_path` to your real layout.
+
+Why wrappers matter:
+
+- the launcher needs to stop its own UI before handing the screen away
+- RaspyJack needs a clean start path
+- the launcher needs a clean return path after RaspyJack exits
+
+If your RaspyJack install is not service-based, replace the `systemctl` calls in the wrappers with direct launch and shutdown commands. The launcher does not care whether the handoff target is a service or a script. It cares whether the handoff is clean.
+
+If you need the 1.3in panel adaptation and return hook, inspect [third_party/raspyjack_patch](/home/kari/Projects/kari-launcher/third_party/raspyjack_patch). It is a narrow patch bundle, not a claim that we have somehow become RaspyJack headquarters.
+
+### 8. Install the launcher service
+
+Once the config is real and the external tools are real:
+
+```bash
+sudo ./install_dashboard_service.sh
+```
+
+That installs and enables:
+
+- `kari-bootscreen.service`
+- `kari-dashboard.service`
+
+It also installs `termie.service` as part of the same service bundle so the launcher-managed handoff target is present when you choose to use it.
+
+Useful checks:
+
+```bash
+sudo systemctl status kari-bootscreen.service
+sudo systemctl status kari-dashboard.service
+sudo journalctl -u kari-dashboard.service -f
+```
+
+The dashboard service intentionally runs as `root`. That is not because root is fashionable. It is because GPIO access, framebuffer ownership, interface control, and service orchestration are all much less annoying when you stop pretending they are ordinary unprivileged desktop tasks.
+
+### 9. First-run checklist for a DIY build
+
+Before calling the build "done", confirm all of this:
+
+1. `./bin/dashboard` starts cleanly inside the venv.
+2. The physical panel is upright, readable, and not color-garbled.
+3. Joystick and front-key input matches your wiring.
+4. `http://<pi-ip>:8787` mirrors the device display.
+5. `Network Ops` shows the interfaces you actually own.
+6. `Kismet` reports the source policy you intended.
+7. `AngryOxide` logs to the path you configured.
+8. `RaspyJack` handoff stops the launcher, gives away the display cleanly, and returns cleanly.
+
+If one of those fails, fix that layer first. Layering more tools on top of a lie does not make the lie more sophisticated.
 
 ## Quick Start
 
@@ -229,6 +535,8 @@ sudo systemctl restart kari-dashboard.service
 
 After boot:
 
+- the panel should show `booting.png` early instead of sitting black while the rest of the system wakes up
+- the launcher should then crossfade into the normal `KARI.png` splash
 - `Overview` should show hostname, Tailscale IP, battery, CPU, RAM, and local Wi-Fi state
 - `Network Ops` should show `wlan0` and any attached external radios
 - `Lantern` should show at least the local IP and gateway before you run discovery
@@ -268,6 +576,11 @@ Important top-level keys:
 - `network_ops`
 - `kismet`
 - `remote`
+
+Boot splash assets:
+
+- `booting.png`: early boot screen shown by `kari-bootscreen.service`
+- `KARI.png`: launcher startup splash shown by the dashboard itself
 
 Practical reality:
 
@@ -622,6 +935,10 @@ Example:
 }
 ```
 
+## Pika
+
+What it is:
+
 ## RaspyJack
 
 What it is:
@@ -804,6 +1121,39 @@ If a page in this launcher wraps another project:
 - then wire it into K.A.R.I Launcher
 
 The launcher is the conductor. It is not the orchestra.
+
+## Boot Screen
+
+What it is:
+
+This build now has a two-stage visual startup path so the panel does not spend boot looking dead.
+
+What happens:
+
+- `kari-bootscreen.service` starts early and paints `booting.png`
+- that image fades in and stays on the display while the rest of the box is still waking up
+- when `kari-dashboard.service` finally starts, the launcher crossfades from `booting.png` into `KARI.png`
+
+Files involved:
+
+- [booting.png](/home/kari/Projects/kari-launcher/booting.png)
+- [bootscreen.py](/home/kari/Projects/kari-launcher/src/launcher/bootscreen.py)
+- [bootscreen](/home/kari/Projects/kari-launcher/bin/bootscreen)
+- [kari-bootscreen.service](/home/kari/Projects/kari-launcher/systemd/kari-bootscreen.service)
+
+Tutorial:
+
+1. Place your preferred early boot image at `booting.png`.
+2. Install the dashboard service with `sudo ./install_dashboard_service.sh`.
+3. Reboot the Pi.
+4. Confirm the panel shows the early boot image before the main launcher is fully ready.
+5. Confirm the handoff into the normal launcher splash looks clean on your hardware.
+
+Warnings:
+
+- this is a visual handoff, not a second full launcher instance
+- if the early boot screen ever feels slower than it should, profile the bootscreen path before adding more moving parts
+- the panel retains the last written frame, which is useful here and dangerous if you forget how much work the display is doing for you
 
 ## RaspyJack Patch Bundle
 

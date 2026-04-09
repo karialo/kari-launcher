@@ -89,6 +89,11 @@ def _resolve_config_path() -> Path:
 
 
 CONFIG_PATH = _resolve_config_path()
+USER_HOME = CONFIG_PATH.parent.parent.parent
+DEFAULT_PROJECTS_DIR = USER_HOME / "Projects"
+DEFAULT_LAUNCHER_DIR = DEFAULT_PROJECTS_DIR / "kari-launcher"
+DEFAULT_RASPYJACK_DIR = DEFAULT_PROJECTS_DIR / "Raspyjack"
+DEFAULT_RESULTS_DIR = USER_HOME / "Results"
 ANGRYOXIDE_PID_PATH = Path("/tmp/portableops-angryoxide.pid")
 REMOTE_ACTION_LOG_PATH = Path("/tmp/portableops-remote-actions.log")
 SPLASH_FILENAME = "KARI.png"
@@ -208,10 +213,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "debounce_seconds": 0.10,
     },
     "managed_apps": {
+        "termie": {
+            "label": "Termie",
+            "start_cmd": str(DEFAULT_LAUNCHER_DIR / "start_termie.sh"),
+            "stop_cmd": str(DEFAULT_LAUNCHER_DIR / "stop_termie.sh"),
+            "status_cmd": "systemctl is-active termie.service",
+            "takes_over_display": True,
+        },
         "raspyjack": {
             "label": "RaspyJack",
-            "start_cmd": "/home/kari/Projects/start_raspyjack.sh",
-            "stop_cmd": "/home/kari/Projects/stop_raspyjack.sh",
+            "start_cmd": str(DEFAULT_LAUNCHER_DIR / "start_raspyjack.sh"),
+            "stop_cmd": str(DEFAULT_LAUNCHER_DIR / "stop_raspyjack.sh"),
             "status_cmd": "systemctl is-active raspyjack.service raspyjack-device.service raspyjack-webui.service",
             "takes_over_display": True,
         }
@@ -253,18 +265,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "webui_host": "127.0.0.1",
         "webui_port": 8080,
         "webui_url": "",
-        "loot_path": "/home/kali/Raspyjack/loot",
+        "loot_path": str(DEFAULT_RASPYJACK_DIR / "loot"),
         "primary_interface": "wlan0",
         "monitor_interface": "wlan1",
     },
     "angryoxide": {
         "interface": "wlan1",
         "start_monitor_cmd": "startmonitormode",
-        "command": "/home/kali/angryoxide -i wlan1",
+        "command": str(USER_HOME / "bin" / "angryoxide") + " -i wlan1",
         "whitelist_flag": "--whitelist",
         "whitelist_networks": [],
-        "log_path": "/home/kali/Results/angryoxide-live.log",
-        "results_dir": "/home/kali/Results",
+        "log_path": str(DEFAULT_RESULTS_DIR / "angryoxide-live.log"),
+        "results_dir": str(DEFAULT_RESULTS_DIR),
         "results_prefix": "oxide",
         "run_profiles": {
             "standard": [],
@@ -320,6 +332,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "webui_host": "127.0.0.1",
         "webui_port": 2501,
         "capture_dirs": ["/var/log/kismet", "~/kismet"],
+    },
+    "termie": {
+        "log_path": "/tmp/termie.log",
+        "service_name": "termie.service",
     },
     "nmap": {
         "interface": "wlan0",
@@ -406,6 +422,27 @@ class RaspyJackStatus:
     latest_nmap_mtime: float | None
     latest_nmap_stable: bool
     latest_nmap_preview_lines: list[str]
+
+
+@dataclass
+class ManagedAppStatus:
+    app_id: str
+    label: str
+    running: bool
+    state_text: str
+    start_cmd: str
+    stop_cmd: str
+    status_cmd: str
+
+
+@dataclass
+class TermieStatus:
+    running: bool
+    state_text: str
+    log_path: str
+    log_exists: bool
+    log_size_bytes: int
+    last_line: str
 
 
 @dataclass
@@ -509,6 +546,7 @@ class Snapshot:
     gps: GPSStatus
     network: NetworkStatus
     nodes: list[NodeStatus]
+    termie: TermieStatus
     raspyjack: RaspyJackStatus
     angryoxide: AngryOxideStatus
 
@@ -835,7 +873,7 @@ def resolve_command(command: str) -> str:
     if "/" not in head and not head.startswith("."):
         found = shutil.which(head)
         if not found:
-            for candidate in (f"/home/kali/{head}", f"/home/kali/{head}.sh"):
+            for candidate in (USER_HOME / head, USER_HOME / f"{head}.sh"):
                 p = Path(candidate)
                 if p.exists() and os.access(str(p), os.X_OK):
                     found = str(p)
@@ -1836,7 +1874,7 @@ def _candidate_nmap_dirs(rj_cfg: dict[str, Any], loot_path: Path) -> list[Path]:
                 dirs.append(p)
     if loot_path not in dirs:
         dirs.append(loot_path / "Nmap")
-    for p in (Path("/root/Raspyjack/loot/Nmap"), Path("/home/kari/Projects/Raspyjack/loot/Nmap")):
+    for p in (Path("/root/Raspyjack/loot/Nmap"), DEFAULT_RASPYJACK_DIR / "loot" / "Nmap"):
         if p not in dirs:
             dirs.append(p)
     return dirs
@@ -2200,9 +2238,9 @@ def collect_raspyjack(config: dict[str, Any]) -> RaspyJackStatus:
     primary_iface = str(rj_cfg.get("primary_interface", "wlan0"))
     monitor_iface = str(rj_cfg.get("monitor_interface", "wlan1"))
 
-    loot_path = Path(str(rj_cfg.get("loot_path", "/home/kali/Raspyjack/loot"))).expanduser()
+    loot_path = Path(str(rj_cfg.get("loot_path", str(DEFAULT_RASPYJACK_DIR / "loot")))).expanduser()
     if not loot_path.exists():
-        for alt in (Path("/root/Raspyjack/loot"), Path("/home/kari/Projects/Raspyjack/loot")):
+        for alt in (Path("/root/Raspyjack/loot"), DEFAULT_RASPYJACK_DIR / "loot"):
             if alt.exists():
                 loot_path = alt
                 break
@@ -2232,8 +2270,80 @@ def collect_raspyjack(config: dict[str, Any]) -> RaspyJackStatus:
     )
 
 
+def collect_managed_app(app_id: str, config: dict[str, Any]) -> ManagedAppStatus:
+    ma_cfg = config.get("managed_apps", {}) if isinstance(config.get("managed_apps"), dict) else {}
+    entry = ma_cfg.get(app_id, {}) if isinstance(ma_cfg.get(app_id), dict) else {}
+    label = clean_text(entry.get("label", app_id.title()), 32) or app_id.title()
+    start_cmd = clean_text(entry.get("start_cmd", ""), 256)
+    stop_cmd = clean_text(entry.get("stop_cmd", ""), 256)
+    status_cmd = clean_text(entry.get("status_cmd", ""), 256)
+    running = False
+    state_text = "inactive"
+    if status_cmd:
+        rc, out, err = run_shell(status_cmd, timeout=3.0)
+        tokens = [clean_text(x, 24).lower() for x in (out + "\n" + err).splitlines() if clean_text(x, 24)]
+        if rc == 0 and any(x == "active" for x in tokens):
+            running = True
+            state_text = "active"
+        elif tokens:
+            state_text = clean_text(tokens[0], 24)
+        elif rc == 0:
+            state_text = "ok"
+    return ManagedAppStatus(
+        app_id=app_id,
+        label=label,
+        running=running,
+        state_text=state_text,
+        start_cmd=start_cmd,
+        stop_cmd=stop_cmd,
+        status_cmd=status_cmd,
+    )
+
+
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+TERMIE_PREFIX_RE = re.compile(
+    r"^(?:\[[^\]]+\]\s*|"
+    r"[A-Z][a-z]{2}\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+|"
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\s*)"
+)
+
+
+def sanitize_termie_line(line: str) -> str:
+    text = ANSI_ESCAPE_RE.sub("", line or "")
+    text = text.replace("\r", " ").replace("\t", " ")
+    text = TERMIE_PREFIX_RE.sub("", text)
+    return clean_text(text, 180)
+
+
+def collect_termie(config: dict[str, Any]) -> TermieStatus:
+    app = collect_managed_app("termie", config)
+    termie_cfg = config.get("termie", {}) if isinstance(config.get("termie"), dict) else {}
+    log_path = Path(str(termie_cfg.get("log_path", "/tmp/termie.log"))).expanduser()
+    exists = log_path.exists()
+    size = 0
+    last_line = ""
+    if exists:
+        try:
+            size = int(log_path.stat().st_size)
+        except Exception:
+            size = 0
+        for raw in reversed(tail_lines(log_path, 24)):
+            cleaned = sanitize_termie_line(raw)
+            if cleaned:
+                last_line = cleaned
+                break
+    return TermieStatus(
+        running=app.running,
+        state_text=app.state_text,
+        log_path=str(log_path),
+        log_exists=exists,
+        log_size_bytes=size,
+        last_line=last_line,
+    )
+
+
 def build_angryoxide_command(cfg: dict[str, Any]) -> str:
-    base = clean_text(cfg.get("command", "/home/kali/angryoxide -i wlan1"), 512)
+    base = clean_text(cfg.get("command", str(USER_HOME / "bin" / "angryoxide") + " -i wlan1"), 512)
     networks = cfg.get("whitelist_networks", [])
     flag = clean_text(cfg.get("whitelist_flag", "--whitelist"), 32)
 
@@ -2252,8 +2362,8 @@ def collect_angryoxide(config: dict[str, Any]) -> AngryOxideStatus:
     ao_cfg = config.get("angryoxide", {}) if isinstance(config.get("angryoxide"), dict) else {}
     iface = clean_text(ao_cfg.get("interface", "wlan1"), 24)
     command = build_angryoxide_command(ao_cfg)
-    log_path = Path(str(ao_cfg.get("log_path", "/home/kali/Results/angryoxide-live.log"))).expanduser()
-    results_dir = Path(str(ao_cfg.get("results_dir", "/home/kali/Results"))).expanduser()
+    log_path = Path(str(ao_cfg.get("log_path", str(DEFAULT_RESULTS_DIR / "angryoxide-live.log")))).expanduser()
+    results_dir = Path(str(ao_cfg.get("results_dir", str(DEFAULT_RESULTS_DIR)))).expanduser()
     results_prefix = clean_text(ao_cfg.get("results_prefix", "oxide"), 32)
 
     pid = read_pid_file(ANGRYOXIDE_PID_PATH)
@@ -2349,6 +2459,7 @@ def collect_snapshot(config: dict[str, Any]) -> Snapshot:
         gps=gps,
         network=collect_network_status(config),
         nodes=nodes,
+        termie=collect_termie(config),
         raspyjack=collect_raspyjack(config),
         angryoxide=collect_angryoxide(config),
     )
@@ -2739,6 +2850,7 @@ class DashboardApp:
         pages.append("kismet")
         pages.append("foxhunt")
         pages.append("wifite")
+        pages.append("termie")
         pages.append("raspyjack")
         pages.append("angryoxide")
         return pages
@@ -3194,6 +3306,10 @@ class DashboardApp:
             "kismet_stop": "kismet_stop",
             "kismet_restart": "kismet_restart",
             "kismet_recover": "kismet_recover",
+            "termie": "goto_termie",
+            "termie_start": "termie_start",
+            "termie_stop": "termie_stop",
+            "termie_clearlog": "termie_clearlog",
             "nmap_refresh": "nmap_refresh",
             "nmap_services": "nmap_services",
             "nmap_clear": "nmap_clear",
@@ -3217,6 +3333,7 @@ class DashboardApp:
             "kismet": "goto_kismet",
             "foxhunt": "goto_foxhunt",
             "wifite": "goto_wifite",
+            "termie": "goto_termie",
             "raspyjack": "goto_raspyjack",
             "angryoxide": "goto_angryoxide",
             "rj_core_start": "rj_core_start",
@@ -3426,6 +3543,27 @@ class DashboardApp:
             ok = self.kismet.remote_action(action)
             self._log_remote_action(action, source, "ok" if ok else "invalid_state")
             return
+        if action == "termie_start":
+            self._launch_managed_app("termie")
+            self._log_remote_action(action, source, "ok")
+            return
+        if action == "termie_stop":
+            self._stop_managed_app("termie")
+            self._log_remote_action(action, source, "ok")
+            return
+        if action == "termie_clearlog":
+            termie_cfg = self.config.get("termie", {}) if isinstance(self.config.get("termie"), dict) else {}
+            log_path = Path(str(termie_cfg.get("log_path", "/tmp/termie.log"))).expanduser()
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text("", encoding="utf-8")
+                self._set_status("Termie log cleared", 5.0)
+                self.refresh_event.set()
+                self._log_remote_action(action, source, "ok")
+            except Exception as e:
+                self._set_status(f"Termie clear failed: {clean_text(e, 40)}", 8.0)
+                self._log_remote_action(action, source, "failed")
+            return
         if action.startswith("nmap_"):
             ok = self.nmap_page.remote_action(action)
             self._log_remote_action(action, source, "ok" if ok else "invalid_state")
@@ -3489,6 +3627,7 @@ class DashboardApp:
             "goto_kismet": "kismet",
             "goto_foxhunt": "foxhunt",
             "goto_wifite": "wifite",
+            "goto_termie": "termie",
             "goto_raspyjack": "raspyjack",
             "goto_angryoxide": "angryoxide",
         }.get(action)
@@ -4214,6 +4353,14 @@ class DashboardApp:
                 }
                 for n in snap.nodes
             ],
+            "termie": {
+                "running": snap.termie.running,
+                "state": snap.termie.state_text,
+                "log_path": snap.termie.log_path,
+                "log_exists": snap.termie.log_exists,
+                "log_size_bytes": snap.termie.log_size_bytes,
+                "last_line": snap.termie.last_line,
+            },
             "raspyjack": {
                 "core": snap.raspyjack.core_state,
                 "device": snap.raspyjack.device_state,
@@ -4694,6 +4841,7 @@ class DashboardApp:
           <button class="nav-btn" data-nav="kismet" onclick="act('kismet')">Kismet<small>passive capture status</small></button>
           <button class="nav-btn" data-nav="foxhunt" onclick="act('foxhunt')">FoxHunt<small>recon and tracking</small></button>
           <button class="nav-btn" data-nav="wifite" onclick="act('wifite')">Wifite<small>passive target prep</small></button>
+          <button class="nav-btn" data-nav="termie" onclick="act('termie')">Termie<small>live log viewer</small></button>
           <button class="nav-btn" data-nav="raspyjack" onclick="act('raspyjack')">RaspyJack<small>stack and loot</small></button>
           <button class="nav-btn" data-nav="angryoxide" onclick="act('angryoxide')">AngryOxide<small>packet ops</small></button>
         </div>
@@ -4846,6 +4994,18 @@ class DashboardApp:
           <pre class="log" id="wifitelog">(loading)</pre>
         </section>
 
+        <section class="panel page" data-view="termie">
+          <h3 class="section-title">Termie</h3>
+          <div class="blurb mono" id="termie">loading...</div>
+          <div class="controls">
+            <button class="action-btn" onclick="act('termie_start')">Launch</button>
+            <button class="action-btn" onclick="act('termie_stop')">Stop</button>
+            <button class="action-btn" onclick="act('termie_clearlog')">Clear Log</button>
+            <button class="action-btn" onclick="act('refresh')">Refresh Data</button>
+          </div>
+          <pre class="log" id="termielog">(loading)</pre>
+        </section>
+
         <section class="panel page" data-view="raspyjack">
           <h3 class="section-title">RaspyJack</h3>
           <div class="blurb mono" id="rj">loading...</div>
@@ -4927,6 +5087,7 @@ class DashboardApp:
       kismet: { title: "Kismet", desc: "Passive capture stack status and recent files." },
       foxhunt: { title: "FoxHunt", desc: "Wireless recon, target lock, and hunt state." },
       wifite: { title: "Wifite", desc: "Passive network selection and target prep." },
+      termie: { title: "Termie", desc: "Fullscreen wrapped log tail for long-running remote commands." },
       raspyjack: { title: "RaspyJack", desc: "Stack state, loot, and latest nmap output." },
       angryoxide: { title: "AngryOxide", desc: "Packet capture workflow and live run status." }
     };
@@ -5320,6 +5481,17 @@ class DashboardApp:
             ? (wfScanRows.length ? wfScanRows.join("\\n") : "(no APs visible)")
             : (wfIdleRows.length ? wfIdleRows.join("\\n") : "(no target selected)");
 
+        const termie = d.termie || {};
+        const termieLogPath = String(termie.log_path || "/tmp/termie.log");
+        document.getElementById("termie").innerHTML =
+          `state ${esc(termie.state || "inactive")} | running ${yn(termie.running)}<br>` +
+          `log ${esc(termieLogPath)}<br>` +
+          `size ${esc(fmtBytes(termie.log_size_bytes || 0))} | exists ${yn(termie.log_exists)}`;
+        document.getElementById("termielog").textContent =
+          (termie.last_line && String(termie.last_line).trim())
+            ? String(termie.last_line)
+            : "(no log output yet)";
+
         const rj = d.raspyjack || {};
         const latestNmap = rj.latest_nmap || {};
         const latestAge = (latestNmap.age_seconds === null || latestNmap.age_seconds === undefined) ? "n/a" : `${Math.round(Number(latestNmap.age_seconds))}s ago`;
@@ -5590,6 +5762,8 @@ class DashboardApp:
             return self.trafficview.footer_text()
         if page == "kismet":
             return self.kismet.footer_text()
+        if page == "termie":
+            return "U/D move  OK act  K1 run  K2 stop"
         if page == "networkops":
             if self.network_ops_menu_open:
                 return "U/D select  OK run  Y close  K3 home"
@@ -5947,6 +6121,22 @@ class DashboardApp:
         ]
         self._draw_main_panel(theme, "MANAGED APP", "RaspyJack", lines, "raspyjack", selected_index=selected, action_rows=actions)
 
+    def _draw_termie_page(self, theme: Theme, snap: Snapshot) -> None:
+        termie = snap.termie
+        state_color = theme.ok if termie.running else theme.warn
+        actions = ["Launch", "Stop", "Clear Log"]
+        selected = self.cursor_idx.get("termie", 0) % len(actions)
+        log_name = Path(termie.log_path).name if termie.log_path else "termie.log"
+        lines = [
+            ("TERMIE", theme.neon_primary),
+            (f"state {termie.state_text}", state_color),
+            (f"log {clean_text(log_name, 18)}", theme.text),
+            (f"size {format_bytes(termie.log_size_bytes)}", theme.text),
+            (clean_text(termie.last_line or "waiting for output", 34), theme.dim_text),
+            ("tail live logs on device", theme.dim_text),
+        ]
+        self._draw_main_panel(theme, "MANAGED APP", "Termie", lines, "termie", selected_index=selected, action_rows=actions)
+
     def _draw_angryoxide_page(self, theme: Theme, snap: Snapshot) -> None:
         ao = snap.angryoxide
         view = self.ao_menu.render_view(bool(ao.running))
@@ -6240,6 +6430,8 @@ class DashboardApp:
                 self._draw_trafficview_page(theme, snap)
             elif page == "kismet":
                 self._draw_kismet_page(theme, snap)
+            elif page == "termie":
+                self._draw_termie_page(theme, snap)
             elif page.startswith("node:"):
                 self._draw_node_page(theme, snap, page.split(":", 1)[1])
             elif page == "foxhunt":
@@ -6306,9 +6498,9 @@ class DashboardApp:
         if not run_cmd:
             self._set_status("AngryOxide command empty", 8.0)
             return
-        log_path = Path(str(ao_cfg.get("log_path", "/home/kali/Results/angryoxide-live.log"))).expanduser()
+        log_path = Path(str(ao_cfg.get("log_path", str(DEFAULT_RESULTS_DIR / "angryoxide-live.log")))).expanduser()
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        run_cwd = Path("/home/kali")
+        run_cwd = USER_HOME
         try:
             parts = shlex.split(run_cmd)
             if parts and parts[0].startswith("/"):
@@ -6555,6 +6747,11 @@ class DashboardApp:
             else:
                 self._scroll_page(page, delta)
             return
+        if page == "termie":
+            count = 3
+            self.cursor_idx[page] = (self.cursor_idx.get(page, 0) + delta) % count
+            self._request_redraw()
+            return
         if page == "networkops":
             if self.network_ops_menu_open:
                 count = len(self._network_ops_menu_items())
@@ -6597,6 +6794,15 @@ class DashboardApp:
             return
         if page == "kismet":
             self.kismet.ok()
+            return
+        if page == "termie":
+            selected = self.cursor_idx.get(page, 0) % 3
+            if selected == 0:
+                self._launch_managed_app("termie")
+            elif selected == 1:
+                self._stop_managed_app("termie")
+            else:
+                self._apply_remote_action("termie_clearlog")
             return
         if page == "overview":
             self._set_status("Refreshing...", 3.0)
@@ -6694,6 +6900,17 @@ class DashboardApp:
             elif key == pygame.K_F3:
                 if not self.kismet.back():
                     self._set_page_index(self._home_page_index(), direction=-1)
+            return
+
+        if page == "termie":
+            if key in (pygame.K_x, pygame.K_RETURN, pygame.K_F1):
+                self._activate_page_action(page, key)
+            elif key in (pygame.K_y, pygame.K_F2):
+                selected = self.cursor_idx.get(page, 0) % 3
+                self.cursor_idx[page] = (selected + 1) % 3
+                self._request_redraw()
+            elif key == pygame.K_F3:
+                self._set_page_index(self._home_page_index(), direction=-1)
             return
 
         if page == "overview":

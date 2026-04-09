@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SERVICE_NAMES=("kari-bootscreen.service" "kari-dashboard.service")
+SERVICE_NAMES=("kari-bootscreen.service" "kari-dashboard.service" "termie.service")
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_USER="${SUDO_USER:-kali}"
+RUN_USER="${SUDO_USER:-${USER:-pi}}"
 RUN_HOME="$(getent passwd "${RUN_USER}" | cut -d: -f6 || true)"
 if [[ -z "${RUN_HOME}" ]]; then
   RUN_HOME="/home/${RUN_USER}"
@@ -36,9 +36,13 @@ done
 systemctl daemon-reload
 systemctl enable --now kari-bootscreen.service
 systemctl enable --now kari-dashboard.service
+systemctl disable termie.service >/dev/null 2>&1 || true
 
 echo
-echo "Installed and started kari-bootscreen.service and kari-dashboard.service"
+echo "Installed kari-bootscreen.service, kari-dashboard.service, and termie.service"
+echo "Started kari-bootscreen.service and kari-dashboard.service"
 systemctl --no-pager --full status kari-bootscreen.service || true
 echo
 systemctl --no-pager --full status kari-dashboard.service || true
+echo
+systemctl --no-pager --full status termie.service || true
