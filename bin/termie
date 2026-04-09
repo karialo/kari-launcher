@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+export PYTHONPATH="$HERE/src${PYTHONPATH:+:$PYTHONPATH}"
+export TERMIE_LOG_PATH="${TERMIE_LOG_PATH:-/tmp/termie.log}"
+if [[ -x "$HERE/.venv/bin/python" ]]; then
+  exec "$HERE/.venv/bin/python" -m launcher.termie "$@"
+fi
+exec python3 -m launcher.termie "$@"
