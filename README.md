@@ -274,6 +274,7 @@ sudo apt install -y \
   python3-venv \
   python3-dev \
   build-essential \
+  python3-numpy \
   python3-setuptools \
   python3-wheel \
   network-manager \
@@ -293,11 +294,13 @@ mkdir -p ~/Projects
 cd ~/Projects
 git clone <your-repo-url> kari-launcher
 cd ~/Projects/kari-launcher
-python3 -m venv .venv
+python3 -m venv --system-site-packages .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip wheel setuptools
 python -m pip install -r requirements.txt
 ```
+
+`numpy` is handled through the distro package on Pi-family Debian/Kali builds instead of asking `pip` to compile it in the venv. That is intentional. On armhf with Python `3.13`, the source-build fallback is where the Kali DIY bootstrap fell over.
 
 Current Python package set in [requirements.txt](./requirements.txt):
 
@@ -305,7 +308,6 @@ Current Python package set in [requirements.txt](./requirements.txt):
 - `pygame`
 - `RPi.GPIO`
 - `spidev`
-- `numpy`
 - `st7789`
 - `displayhatmini`
 
@@ -313,7 +315,7 @@ Why those matter:
 
 - `Pillow` and `pygame` are the rendering stack
 - `RPi.GPIO`, `spidev`, and `st7789` are the physical-panel and button path
-- `numpy` is used by the display path when the ST7789 backend is active
+- `numpy` is used by the display path when the ST7789 backend is active, but on Kali/Raspberry Pi OS we rely on `python3-numpy` from `apt` instead of a `pip` wheel or source build
 - `displayhatmini` stays in the list because the code still supports that older backend for compatibility
 
 If you skip the venv and rely on whatever your distro Python happens to have lying around, you are volunteering for a class of bugs that do not deserve your loyalty.

@@ -28,6 +28,7 @@ APT_PACKAGES=(
   python3
   python3-dev
   python3-pip
+  python3-numpy
   python3-setuptools
   python3-venv
   python3-wheel
@@ -116,7 +117,7 @@ create_directories() {
 
 setup_venv() {
   say "Creating launcher virtual environment"
-  python3 -m venv "${VENV_DIR}"
+  python3 -m venv --system-site-packages "${VENV_DIR}"
   "${PIP_BIN}" install --upgrade pip wheel setuptools
   "${PIP_BIN}" install -r "${REPO_DIR}/requirements.txt"
 }
