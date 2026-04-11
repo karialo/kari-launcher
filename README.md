@@ -245,6 +245,7 @@ What it handles:
 - `wlan0` maintenance Wi-Fi setup through `nmcli`
 - optional RaspyJack / AngryOxide / Wifite2 / Kismet upstream clones
 - optional RaspyJack installer run immediately after cloning
+- optional AngryOxide install from the latest compatible release binary, with source build as a fallback
 - optional Wifite2 source install plus common helper packages when available on the OS
 - optional Kismet package install plus launcher-side source policy
 - optional RaspyJack `1.3in` patch application after RaspyJack has been installed
@@ -530,6 +531,21 @@ Practical note:
 
 - the launcher wraps AngryOxide through `script(1)` so the process gets a PTY under service control
 - if your build uses a different binary name, wrapper script, or working directory, reflect that in the config instead of expecting autodetection to save you
+
+The DIY installer first tries the practical path:
+
+```text
+Install AngryOxide from the latest compatible release binary [Y/n]:
+```
+
+That queries GitHub's latest release metadata and chooses a Linux `aarch64` / `arm64` asset when one is available. If that fails or if you explicitly want a source tree, the installer can still clone and build AngryOxide from source:
+
+```text
+Clone AngryOxide upstream source into /home/<user>/Projects/AngryOxide [y/N]:
+Build and install AngryOxide from /home/<user>/Projects/AngryOxide [Y/n]:
+```
+
+That path uses a submodule-aware clone because AngryOxide currently needs `libs/libwifi`, installs Rust/Cargo build prerequisites through apt, runs `make build`, then runs `sudo make install`. On Raspberry Pi OS Trixie this pulls in a large Rust toolchain, so budget time and disk space for it.
 
 ### 7. Plumb RaspyJack into the launcher
 
@@ -1026,7 +1042,7 @@ Example:
   "interface": "wlan1",
   "scan_max_results": 32,
   "scan_interval_active_seconds": 4.0,
-  "run_command": "sudo wifite -i wlan1 -b $WIFITE_TARGET_BSSID -c $WIFITE_TARGET_CHANNEL --kill"
+  "run_command": "sudo /usr/local/sbin/wifite -i wlan1 -b $WIFITE_TARGET_BSSID -c $WIFITE_TARGET_CHANNEL --kill"
 }
 ```
 
@@ -1042,6 +1058,8 @@ It uses:
 - <https://github.com/derv82/wifite2>
 
 When that install path is selected, the installer also attempts to install common Wifite helper packages that exist on the current OS release, such as `aircrack-ng`, `reaver`, `bully`, `tshark`, `hcxtools`, `hcxdumptool`, and `macchanger`. Missing packages are skipped with a warning instead of aborting the whole launcher install.
+
+On current Raspberry Pi OS / Python `3.13`, Wifite2's upstream `setup.py install` creates a broken console entrypoint at `/usr/sbin/wifite`. The DIY installer therefore also installs `/usr/local/sbin/wifite` as a wrapper around the repo's `Wifite.py`, which is the path that actually runs on this image.
 
 ## Pika
 

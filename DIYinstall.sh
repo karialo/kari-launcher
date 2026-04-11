@@ -52,6 +52,14 @@ die() {
   exit 1
 }
 
+run_as_user() {
+  if [[ "$(id -u)" -eq 0 && "${RUN_USER}" != "root" ]]; then
+    sudo -H -u "${RUN_USER}" "$@"
+  else
+    "$@"
+  fi
+}
+
 ask() {
   local prompt="$1"
   local default="${2:-}"
@@ -117,18 +125,24 @@ install_apt_packages() {
 create_directories() {
   say "Creating user directories"
   mkdir -p "${PROJECTS_DIR}" "${RESULTS_DIR}" "${CFG_DIR}"
+  if [[ "$(id -u)" -eq 0 && "${RUN_USER}" != "root" ]]; then
+    chown "${RUN_USER}:${RUN_USER}" "${PROJECTS_DIR}" "${RESULTS_DIR}" "${CFG_DIR}" || true
+  fi
 }
 
 setup_venv() {
   say "Creating launcher virtual environment"
-  python3 -m venv --system-site-packages "${VENV_DIR}"
-  "${PIP_BIN}" install --upgrade pip wheel setuptools
-  "${PIP_BIN}" install -r "${REPO_DIR}/requirements.txt"
+  if [[ "$(id -u)" -eq 0 && "${RUN_USER}" != "root" && -d "${VENV_DIR}" ]]; then
+    chown -R "${RUN_USER}:${RUN_USER}" "${VENV_DIR}" || true
+  fi
+  run_as_user python3 -m venv --system-site-packages "${VENV_DIR}"
+  run_as_user "${PIP_BIN}" install --upgrade pip wheel setuptools
+  run_as_user "${PIP_BIN}" install -r "${REPO_DIR}/requirements.txt"
 }
 
 ensure_base_config() {
   say "Writing launcher config scaffold"
-  CFG_PATH="${CFG_PATH}" PYTHONPATH="${REPO_DIR}/src" "${PYTHON_BIN}" - <<'PY'
+  run_as_user env CFG_PATH="${CFG_PATH}" PYTHONPATH="${REPO_DIR}/src" "${PYTHON_BIN}" - <<'PY'
 from pathlib import Path
 from launcher.dashboard import ensure_config
 
@@ -173,7 +187,44 @@ clone_repo_if_needed() {
     warn "Skipping ${url}; destination already exists and is not a git repo: ${dest}"
     return 0
   fi
-  git clone --depth 1 "${url}" "${dest}"
+  run_as_user git clone --depth 1 "${url}" "${dest}"
+}
+
+clone_repo_with_submodules_if_needed() {
+  local url="$1"
+  local dest="$2"
+  if [[ -d "${dest}/.git" ]]; then
+    say "Keeping existing clone at ${dest}"
+    (
+      cd "${dest}"
+      run_as_user git submodule update --init --recursive
+    )
+    return 0
+  fi
+  if [[ -e "${dest}" ]]; then
+    warn "Skipping ${url}; destination already exists and is not a git repo: ${dest}"
+    return 0
+  fi
+  run_as_user git clone --recurse-submodules --depth 1 "${url}" "${dest}"
+}
+
+prepare_raspyjack_root_alias() {
+  [[ -d "${RASPYJACK_DIR}" ]] || return 0
+
+  # Current RaspyJack upstream still has a few absolute /root/Raspyjack paths
+  # in its installer. Keep the user's clone location, but provide the path the
+  # installer expects so a fresh DIY run can continue.
+  if [[ -e /root/Raspyjack || -L /root/Raspyjack ]]; then
+    local resolved=""
+    resolved="$(readlink -f /root/Raspyjack 2>/dev/null || true)"
+    if [[ "${resolved}" != "$(readlink -f "${RASPYJACK_DIR}")" ]]; then
+      warn "/root/Raspyjack already exists and does not point at ${RASPYJACK_DIR}; RaspyJack installer may use the wrong tree"
+    fi
+    return 0
+  fi
+
+  say "Creating /root/Raspyjack compatibility link for RaspyJack installer"
+  sudo ln -s "${RASPYJACK_DIR}" /root/Raspyjack
 }
 
 apt_install_available() {
@@ -211,6 +262,7 @@ apply_raspyjack_patch_bundle() {
 
 install_raspyjack_upstream() {
   [[ -d "${RASPYJACK_DIR}" ]] || die "RaspyJack directory not found: ${RASPYJACK_DIR}"
+  prepare_raspyjack_root_alias
 
   local installer=""
   for candidate in install_raspyjack.sh install.sh setup.sh; do
@@ -231,6 +283,9 @@ install_raspyjack_upstream() {
     sudo bash "${installer}"
   )
   sudo systemctl daemon-reload || true
+  if [[ "$(id -u)" -eq 0 && "${RUN_USER}" != "root" && "${RASPYJACK_DIR}" == "${RUN_HOME}/"* ]]; then
+    chown -R "${RUN_USER}:${RUN_USER}" "${RASPYJACK_DIR}" || true
+  fi
 }
 
 disable_service_units_if_present() {
@@ -322,6 +377,17 @@ install_wifite_from_source() {
       cd "${WIFITE_DIR}"
       sudo python3 setup.py install
     )
+    if [[ -f "${WIFITE_DIR}/Wifite.py" ]]; then
+      say "Installing Wifite2 launcher wrapper"
+      sudo tee /usr/local/sbin/wifite >/dev/null <<EOF
+#!/usr/bin/env sh
+exec python3 "${WIFITE_DIR}/Wifite.py" "\$@"
+EOF
+      sudo chmod 0755 /usr/local/sbin/wifite
+    fi
+    if [[ "$(id -u)" -eq 0 && "${RUN_USER}" != "root" && "${WIFITE_DIR}" == "${RUN_HOME}/"* ]]; then
+      chown -R "${RUN_USER}:${RUN_USER}" "${WIFITE_DIR}" || true
+    fi
   elif [[ -f "${WIFITE_DIR}/Wifite.py" ]]; then
     say "Installing Wifite2 script wrapper"
     sudo install -m 0755 "${WIFITE_DIR}/Wifite.py" /usr/local/sbin/wifite
@@ -330,8 +396,100 @@ install_wifite_from_source() {
   fi
 }
 
+install_angryoxide_from_source() {
+  [[ -d "${ANGRYOXIDE_DIR}" ]] || die "AngryOxide directory not found: ${ANGRYOXIDE_DIR}"
+
+  say "Installing AngryOxide build prerequisites"
+  apt_install_available cargo rustc make pkg-config libssl-dev
+
+  say "Building AngryOxide from source"
+  (
+    cd "${ANGRYOXIDE_DIR}"
+    run_as_user git submodule update --init --recursive
+    run_as_user make build
+    sudo make install
+  )
+
+  if [[ "$(id -u)" -eq 0 && "${RUN_USER}" != "root" && "${ANGRYOXIDE_DIR}" == "${RUN_HOME}/"* ]]; then
+    chown -R "${RUN_USER}:${RUN_USER}" "${ANGRYOXIDE_DIR}" || true
+  fi
+}
+
+install_angryoxide_release() {
+  say "Installing AngryOxide from latest compatible GitHub release"
+  apt_install_available curl tar ca-certificates
+
+  local asset_url=""
+  asset_url="$(python3 - <<'PY'
+import json
+import sys
+import urllib.request
+
+url = "https://api.github.com/repos/Ragnt/AngryOxide/releases/latest"
+with urllib.request.urlopen(url, timeout=20) as resp:
+    data = json.load(resp)
+
+assets = data.get("assets", [])
+preferred = []
+fallback = []
+for asset in assets:
+    name = str(asset.get("name", "")).lower()
+    download = asset.get("browser_download_url")
+    if not download:
+        continue
+    if "linux" not in name:
+        continue
+    if "aarch64" in name or "arm64" in name:
+        preferred.append(download)
+    elif "arm" in name:
+        fallback.append(download)
+
+choices = preferred + fallback
+if not choices:
+    names = ", ".join(str(a.get("name", "")) for a in assets)
+    print(f"No linux arm64/aarch64 AngryOxide release asset found. Assets: {names}", file=sys.stderr)
+    sys.exit(1)
+
+print(choices[0])
+PY
+)"
+
+  [[ -n "${asset_url}" ]] || return 1
+  say "Downloading ${asset_url}"
+
+  local tmpdir=""
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "${tmpdir}"' RETURN
+
+  curl -fL "${asset_url}" -o "${tmpdir}/angryoxide-release"
+  if file "${tmpdir}/angryoxide-release" | grep -qi 'gzip compressed'; then
+    tar -xzf "${tmpdir}/angryoxide-release" -C "${tmpdir}"
+  elif file "${tmpdir}/angryoxide-release" | grep -qi 'tar archive'; then
+    tar -xf "${tmpdir}/angryoxide-release" -C "${tmpdir}"
+  else
+    install -m 0755 "${tmpdir}/angryoxide-release" "${tmpdir}/angryoxide"
+  fi
+
+  local install_script=""
+  install_script="$(find "${tmpdir}" -maxdepth 3 -type f -name install.sh -print -quit)"
+  if [[ -n "${install_script}" ]]; then
+    chmod +x "${install_script}"
+    (
+      cd "$(dirname "${install_script}")"
+      sudo ./install.sh
+    )
+    return 0
+  fi
+
+  local binary=""
+  binary="$(find "${tmpdir}" -maxdepth 4 -type f -name angryoxide -perm /111 -print -quit)"
+  [[ -n "${binary}" ]] || die "Downloaded AngryOxide release did not contain an executable angryoxide binary"
+  sudo install -m 0755 "${binary}" /usr/bin/angryoxide
+}
+
 write_config_values() {
   say "Applying launcher config"
+  run_as_user env \
   CFG_PATH="${CFG_PATH}" \
   RUN_HOME="${RUN_HOME}" \
   PRIMARY_IFACE="${PRIMARY_IFACE}" \
@@ -625,8 +783,21 @@ main() {
     configure_raspyjack_service_override "${RASPYJACK_CORE_SERVICE}"
   fi
 
-  if ask_yes_no "Clone AngryOxide upstream into ${ANGRYOXIDE_DIR}" "n"; then
-    clone_repo_if_needed "https://github.com/Ragnt/AngryOxide.git" "${ANGRYOXIDE_DIR}"
+  if ask_yes_no "Install AngryOxide from the latest compatible release binary" "y"; then
+    install_angryoxide_release || warn "AngryOxide release install failed; source build remains available as fallback"
+  fi
+
+  ANGRYOXIDE_WAS_CLONED="false"
+  if ask_yes_no "Clone AngryOxide upstream source into ${ANGRYOXIDE_DIR}" "n"; then
+    ANGRYOXIDE_WAS_CLONED="true"
+    clone_repo_with_submodules_if_needed "https://github.com/Ragnt/AngryOxide.git" "${ANGRYOXIDE_DIR}"
+  fi
+  if [[ -d "${ANGRYOXIDE_DIR}" ]] && ! command -v angryoxide >/dev/null 2>&1; then
+    ANGRYOXIDE_INSTALL_DEFAULT="n"
+    [[ "${ANGRYOXIDE_WAS_CLONED}" == "true" ]] && ANGRYOXIDE_INSTALL_DEFAULT="y"
+    if ask_yes_no "Build and install AngryOxide from ${ANGRYOXIDE_DIR}" "${ANGRYOXIDE_INSTALL_DEFAULT}"; then
+      install_angryoxide_from_source
+    fi
   fi
 
   WIFITE_WAS_CLONED="false"
@@ -642,8 +813,12 @@ main() {
     fi
   fi
 
-  ANGRYOXIDE_CMD="$(ask "AngryOxide command path" "${RUN_HOME}/bin/angryoxide -i ${MONITOR_IFACE}")"
-  DEFAULT_WIFITE_RUN_COMMAND="sudo wifite -i ${MONITOR_IFACE} -b "'$WIFITE_TARGET_BSSID'" -c "'$WIFITE_TARGET_CHANNEL'" --kill"
+  ANGRYOXIDE_DEFAULT_CMD="/usr/bin/angryoxide -i ${MONITOR_IFACE}"
+  if ! [[ -x /usr/bin/angryoxide ]]; then
+    ANGRYOXIDE_DEFAULT_CMD="${RUN_HOME}/bin/angryoxide -i ${MONITOR_IFACE}"
+  fi
+  ANGRYOXIDE_CMD="$(ask "AngryOxide command path" "${ANGRYOXIDE_DEFAULT_CMD}")"
+  DEFAULT_WIFITE_RUN_COMMAND="sudo /usr/local/sbin/wifite -i ${MONITOR_IFACE} -b "'$WIFITE_TARGET_BSSID'" -c "'$WIFITE_TARGET_CHANNEL'" --kill"
   WIFITE_RUN_COMMAND="$(ask "Wifite run command template (blank to leave disabled)" "${DEFAULT_WIFITE_RUN_COMMAND}")"
 
   ensure_base_config
