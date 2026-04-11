@@ -345,13 +345,27 @@ verify_command_or_path() {
 
 install_kismet_integration() {
   say "Installing Kismet package and launcher helper"
-  sudo apt install -y kismet
-  sudo install -m 0755 "${REPO_DIR}/scripts/kismet-source-autoconfig.sh" /usr/local/bin/kismet-source-autoconfig.sh
-  sudo install -d /etc/systemd/system/kismet.service.d
-  sudo install -m 0644 "${REPO_DIR}/scripts/kismet.service.override.conf" /etc/systemd/system/kismet.service.d/override.conf
-  sudo systemctl daemon-reload
-  sudo systemctl enable kismet.service || true
-  sudo systemctl restart kismet.service || true
+  local ok="true"
+
+  if ! sudo env DEBIAN_FRONTEND=noninteractive apt install -y kismet; then
+    warn "Kismet package install failed; skipping Kismet service integration"
+    return 1
+  fi
+
+  sudo install -m 0755 "${REPO_DIR}/scripts/kismet-source-autoconfig.sh" /usr/local/bin/kismet-source-autoconfig.sh || ok="false"
+  sudo install -d /etc/systemd/system/kismet.service.d || ok="false"
+  sudo install -m 0644 "${REPO_DIR}/scripts/kismet.service.override.conf" /etc/systemd/system/kismet.service.d/override.conf || ok="false"
+  sudo systemctl daemon-reload || ok="false"
+
+  if systemctl list-unit-files | grep -Fq "kismet.service"; then
+    sudo systemctl enable kismet.service || warn "Could not enable kismet.service"
+    sudo systemctl restart kismet.service || warn "Could not restart kismet.service; check journalctl -u kismet.service"
+  else
+    warn "kismet.service was not found after package install"
+    ok="false"
+  fi
+
+  [[ "${ok}" == "true" ]]
 }
 
 install_wifite_from_source() {
@@ -508,6 +522,7 @@ write_config_values() {
   RASPYJACK_CORE_SERVICE="${RASPYJACK_CORE_SERVICE}" \
   RASPYJACK_DEVICE_SERVICE="${RASPYJACK_DEVICE_SERVICE}" \
   RASPYJACK_WEB_SERVICE="${RASPYJACK_WEB_SERVICE}" \
+  RASPYJACK_EXTRA_SERVICES="${RASPYJACK_EXTRA_SERVICES}" \
   ANGRYOXIDE_CMD="${ANGRYOXIDE_CMD}" \
   WIFITE_RUN_COMMAND="${WIFITE_RUN_COMMAND}" \
   RESULTS_DIR="${RESULTS_DIR}" \
@@ -517,6 +532,7 @@ write_config_values() {
   "${PYTHON_BIN}" - <<'PY'
 import json
 import os
+import shlex
 from pathlib import Path
 
 cfg_path = Path(os.environ["CFG_PATH"])
@@ -536,6 +552,7 @@ raspyjack_dir = Path(os.environ["RASPYJACK_DIR"])
 raspyjack_core_service = os.environ["RASPYJACK_CORE_SERVICE"]
 raspyjack_device_service = os.environ["RASPYJACK_DEVICE_SERVICE"]
 raspyjack_web_service = os.environ["RASPYJACK_WEB_SERVICE"]
+raspyjack_extra_services = [s for s in os.environ["RASPYJACK_EXTRA_SERVICES"].split() if s]
 angryoxide_cmd = os.environ["ANGRYOXIDE_CMD"]
 wifite_run_command = os.environ["WIFITE_RUN_COMMAND"]
 local_buttons = os.environ["LOCAL_BUTTONS"].lower() in {"1", "true", "yes", "on"}
@@ -545,20 +562,30 @@ install_kismet = os.environ["INSTALL_KISMET"].lower() in {"1", "true", "yes", "o
 kismet_service_name = os.environ["KISMET_SERVICE_NAME"]
 
 managed_apps = data.setdefault("managed_apps", {})
+repo_dir = Path(os.environ.get("REPO_DIR", "")) if os.environ.get("REPO_DIR") else run_home / "Projects" / "kari-launcher"
+rj_env = {
+    "RJ_CORE_SERVICE": raspyjack_core_service,
+    "RJ_DEVICE_SERVICE": raspyjack_device_service,
+    "RJ_WEB_SERVICE": raspyjack_web_service,
+    "RJ_EXTRA_SERVICES": " ".join(raspyjack_extra_services),
+}
+rj_env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in rj_env.items())
+rj_start_cmd = f"{rj_env_prefix} {shlex.quote(str(repo_dir / 'start_raspyjack.sh'))}".strip()
+rj_stop_cmd = f"{rj_env_prefix} {shlex.quote(str(repo_dir / 'stop_raspyjack.sh'))}".strip()
 managed_apps.setdefault("termie", {})
 managed_apps["termie"].update({
     "label": "Termie",
-    "start_cmd": str(Path(os.environ.get("REPO_DIR", "")) / "start_termie.sh") if os.environ.get("REPO_DIR") else str(run_home / "Projects" / "kari-launcher" / "start_termie.sh"),
-    "stop_cmd": str(Path(os.environ.get("REPO_DIR", "")) / "stop_termie.sh") if os.environ.get("REPO_DIR") else str(run_home / "Projects" / "kari-launcher" / "stop_termie.sh"),
+    "start_cmd": str(repo_dir / "start_termie.sh"),
+    "stop_cmd": str(repo_dir / "stop_termie.sh"),
     "status_cmd": "systemctl is-active termie.service",
     "takes_over_display": True,
 })
 managed_apps.setdefault("raspyjack", {})
 managed_apps["raspyjack"].update({
     "label": "RaspyJack",
-    "start_cmd": str(Path(os.environ.get("REPO_DIR", "")) / "start_raspyjack.sh") if os.environ.get("REPO_DIR") else str(run_home / "Projects" / "kari-launcher" / "start_raspyjack.sh"),
-    "stop_cmd": str(Path(os.environ.get("REPO_DIR", "")) / "stop_raspyjack.sh") if os.environ.get("REPO_DIR") else str(run_home / "Projects" / "kari-launcher" / "stop_raspyjack.sh"),
-    "status_cmd": f"systemctl is-active {raspyjack_core_service} {raspyjack_device_service} {raspyjack_web_service}".strip(),
+    "start_cmd": rj_start_cmd,
+    "stop_cmd": rj_stop_cmd,
+    "status_cmd": f"systemctl is-active {raspyjack_core_service} {raspyjack_device_service} {raspyjack_web_service} {' '.join(raspyjack_extra_services)}".strip(),
     "takes_over_display": True,
 })
 
@@ -586,8 +613,9 @@ network_ops.update({
 })
 
 raspyjack = data.setdefault("raspyjack", {})
+raspyjack_services = [raspyjack_core_service, raspyjack_device_service, raspyjack_web_service] + raspyjack_extra_services
 raspyjack.update({
-    "service_names": [raspyjack_core_service, raspyjack_device_service, raspyjack_web_service],
+    "service_names": raspyjack_services,
     "webui_service_names": [raspyjack_web_service],
     "loot_path": str(raspyjack_dir / "loot"),
     "primary_interface": primary_iface,
@@ -676,7 +704,7 @@ show_summary() {
   printf 'Wi-Fi profile: %s\n' "${WIFI_PROFILE:-<blank>}"
   printf 'Results dir: %s\n' "${RESULTS_DIR}"
   printf 'RaspyJack dir: %s\n' "${RASPYJACK_DIR}"
-  printf 'RaspyJack services: %s %s %s\n' "${RASPYJACK_CORE_SERVICE}" "${RASPYJACK_DEVICE_SERVICE}" "${RASPYJACK_WEB_SERVICE}"
+  printf 'RaspyJack services: %s %s %s %s\n' "${RASPYJACK_CORE_SERVICE}" "${RASPYJACK_DEVICE_SERVICE}" "${RASPYJACK_WEB_SERVICE}" "${RASPYJACK_EXTRA_SERVICES}"
   printf 'AngryOxide command: %s\n' "${ANGRYOXIDE_CMD}"
   printf 'Wifite dir: %s\n' "${WIFITE_DIR}"
   printf 'Wifite run command: %s\n' "${WIFITE_RUN_COMMAND:-<blank>}"
@@ -768,6 +796,7 @@ main() {
   RASPYJACK_CORE_SERVICE="$(ask "RaspyJack core service name" "raspyjack.service")"
   RASPYJACK_DEVICE_SERVICE="$(ask "RaspyJack device service name" "raspyjack-device.service")"
   RASPYJACK_WEB_SERVICE="$(ask "RaspyJack web service name" "raspyjack-webui.service")"
+  RASPYJACK_EXTRA_SERVICES="$(ask "Additional RaspyJack service names to stop/disable" "raspyjack-caddy-autoconfig.service raspyjack-pin-wifi.service")"
 
   if [[ "${DISPLAY_BACKEND}" == "waveshare_1in3" ]] && [[ -d "${RASPYJACK_DIR}" ]]; then
     if ask_yes_no "Apply the bundled RaspyJack 1.3in ST7789 compatibility patch" "y"; then
@@ -776,7 +805,7 @@ main() {
   fi
 
   if ask_yes_no "Stop and disable RaspyJack services so the launcher owns startup by default" "y"; then
-    disable_service_units_if_present "${RASPYJACK_CORE_SERVICE}" "${RASPYJACK_DEVICE_SERVICE}" "${RASPYJACK_WEB_SERVICE}"
+    disable_service_units_if_present "${RASPYJACK_CORE_SERVICE}" "${RASPYJACK_DEVICE_SERVICE}" "${RASPYJACK_WEB_SERVICE}" ${RASPYJACK_EXTRA_SERVICES}
   fi
 
   if ask_yes_no "Install a RaspyJack systemd override for launcher return/display env vars" "y"; then
@@ -826,8 +855,12 @@ main() {
   KISMET_SERVICE_NAME="kismet.service"
   INSTALL_KISMET="false"
   if ask_yes_no "Install Kismet package and launcher source-policy override" "y"; then
-    INSTALL_KISMET="true"
-    install_kismet_integration
+    if install_kismet_integration; then
+      INSTALL_KISMET="true"
+    else
+      INSTALL_KISMET="failed"
+      KISMET_SERVICE_NAME="$(ask "Kismet install failed. Service name to keep in launcher config" "kismet.service")"
+    fi
   else
     KISMET_SERVICE_NAME="$(ask "Existing Kismet service name" "kismet.service")"
   fi

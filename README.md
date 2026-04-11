@@ -247,9 +247,9 @@ What it handles:
 - optional RaspyJack installer run immediately after cloning
 - optional AngryOxide install from the latest compatible release binary, with source build as a fallback
 - optional Wifite2 source install plus common helper packages when available on the OS
-- optional Kismet package install plus launcher-side source policy
+- optional Kismet package install plus launcher-side source policy; package install failure is reported and the wizard continues
 - optional RaspyJack `1.3in` patch application after RaspyJack has been installed
-- optional RaspyJack service disable and launcher-return override after its services exist
+- optional RaspyJack service disable, wrapper command wiring, and launcher-return override after its services exist
 - launcher and watchdog service installation
 
 ### 1. Start with a sane Pi
@@ -497,7 +497,7 @@ The DIY installer can do the package path for you:
 Install Kismet package and launcher source-policy override [Y/n]:
 ```
 
-That installs the distro `kismet` package, installs the launcher source autoconfig helper, installs the `kismet.service` drop-in, reloads systemd, enables the service, and restarts it. Cloning upstream Kismet source is a separate optional reference/build step, not the main install path.
+That installs the distro `kismet` package, installs the launcher source autoconfig helper, installs the `kismet.service` drop-in, reloads systemd, enables the service, and restarts it. If the distro package is missing or apt refuses the install, the DIY installer warns, keeps going, and leaves `kismet.service` in the launcher config as a placeholder to fix later. Cloning upstream Kismet source is a separate optional reference/build step, not the main install path.
 
 Then confirm the launcher config matches reality:
 
@@ -579,11 +579,13 @@ Panel rule:
 For a service-based RaspyJack install, the sane default is:
 
 ```bash
-sudo systemctl stop raspyjack.service raspyjack-device.service raspyjack-webui.service
-sudo systemctl disable raspyjack.service raspyjack-device.service raspyjack-webui.service
+sudo systemctl stop raspyjack.service raspyjack-device.service raspyjack-webui.service raspyjack-caddy-autoconfig.service raspyjack-pin-wifi.service
+sudo systemctl disable raspyjack.service raspyjack-device.service raspyjack-webui.service raspyjack-caddy-autoconfig.service raspyjack-pin-wifi.service
 ```
 
 That is not hostility toward RaspyJack. It is just the cleanest way to stop two different display-owning stacks from both deciding they are in charge at boot.
+
+The stock wrappers use the same five-service default. If your RaspyJack install uses different names, set `RJ_CORE_SERVICE`, `RJ_DEVICE_SERVICE`, `RJ_WEB_SERVICE`, and `RJ_EXTRA_SERVICES`; the DIY installer writes those environment values into the generated launcher commands from your answers.
 
 ### 8. Install the launcher service
 

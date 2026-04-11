@@ -227,7 +227,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "label": "RaspyJack",
             "start_cmd": str(DEFAULT_LAUNCHER_DIR / "start_raspyjack.sh"),
             "stop_cmd": str(DEFAULT_LAUNCHER_DIR / "stop_raspyjack.sh"),
-            "status_cmd": "systemctl is-active raspyjack.service raspyjack-device.service raspyjack-webui.service",
+            "status_cmd": "systemctl is-active raspyjack.service raspyjack-device.service raspyjack-webui.service raspyjack-caddy-autoconfig.service raspyjack-pin-wifi.service",
             "takes_over_display": True,
         }
     },
@@ -237,6 +237,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "raspyjack.service",
             "raspyjack-device.service",
             "raspyjack-webui.service",
+            "raspyjack-caddy-autoconfig.service",
+            "raspyjack-pin-wifi.service",
         ],
         "webui_service_names": [
             "raspyjack-webui.service",

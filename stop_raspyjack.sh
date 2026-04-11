@@ -11,14 +11,32 @@ RJ_SERVICES=(
   "${RJ_DEVICE_SERVICE:-raspyjack-device.service}"
   "${RJ_WEB_SERVICE:-raspyjack-webui.service}"
 )
+RJ_EXTRA_SERVICES="${RJ_EXTRA_SERVICES-raspyjack-caddy-autoconfig.service raspyjack-pin-wifi.service}"
+if [[ -n "${RJ_EXTRA_SERVICES}" ]]; then
+  read -r -a RJ_EXTRA_SERVICE_ARRAY <<< "${RJ_EXTRA_SERVICES}"
+  RJ_SERVICES+=("${RJ_EXTRA_SERVICE_ARRAY[@]}")
+fi
+
+RJ_AVAILABLE_SERVICES=()
+for svc in "${RJ_SERVICES[@]}"; do
+  if systemctl list-unit-files "$svc" --no-legend 2>/dev/null | awk '{print $1}' | grep -Fxq "$svc"; then
+    RJ_AVAILABLE_SERVICES+=("$svc")
+  else
+    echo "Skipping missing RaspyJack unit: $svc"
+  fi
+done
 
 echo "Stopping RaspyJack stack..."
-sudo systemctl stop "${RJ_SERVICES[@]}"
+if [[ "${#RJ_AVAILABLE_SERVICES[@]}" -gt 0 ]]; then
+  sudo systemctl stop "${RJ_AVAILABLE_SERVICES[@]}"
+else
+  echo "No RaspyJack systemd units were found; continuing with process/display cleanup."
+fi
 
 # Wait until service-managed RaspyJack is actually gone.
 for _ in $(seq 1 40); do
   active=0
-  for svc in "${RJ_SERVICES[@]}"; do
+  for svc in "${RJ_AVAILABLE_SERVICES[@]}"; do
     if systemctl is-active --quiet "$svc"; then
       active=1
       break
@@ -93,7 +111,11 @@ sudo systemctl restart "${LAUNCHER_SERVICE}"
 
 echo
 echo "Service status:"
-systemctl --no-pager --full status "${LAUNCHER_SERVICE}" "${RJ_SERVICES[@]}" | sed -n '1,60p'
+if [[ "${#RJ_AVAILABLE_SERVICES[@]}" -gt 0 ]]; then
+  systemctl --no-pager --full status "${LAUNCHER_SERVICE}" "${RJ_AVAILABLE_SERVICES[@]}" | sed -n '1,60p'
+else
+  systemctl --no-pager --full status "${LAUNCHER_SERVICE}" | sed -n '1,60p'
+fi
 
 echo
 echo "If your RaspyJack install is not service-based, replace the systemctl calls in this wrapper with your own shutdown logic."
