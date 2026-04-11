@@ -3,6 +3,12 @@ set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_USER="${SUDO_USER:-${USER:-$(id -un)}}"
+if [[ "${RUN_USER}" == "root" ]]; then
+  REPO_OWNER="$(stat -c '%U' "${HERE}" 2>/dev/null || true)"
+  if [[ -n "${REPO_OWNER}" && "${REPO_OWNER}" != "root" ]]; then
+    RUN_USER="${REPO_OWNER}"
+  fi
+fi
 RUN_HOME="$(getent passwd "${RUN_USER}" | cut -d: -f6 || true)"
 if [[ -z "${RUN_HOME}" ]]; then
   RUN_HOME="/home/${RUN_USER}"
@@ -24,6 +30,7 @@ PIP_BIN="${VENV_DIR}/bin/pip"
 APT_PACKAGES=(
   git
   curl
+  gnupg
   util-linux
   iw
   wireless-tools
@@ -260,6 +267,13 @@ apply_raspyjack_patch_bundle() {
   done
 }
 
+apply_raspyjack_return_hook() {
+  [[ -d "${RASPYJACK_DIR}" ]] || die "RaspyJack directory not found: ${RASPYJACK_DIR}"
+  [[ -f "${RASPYJACK_DIR}/raspyjack.py" ]] || die "RaspyJack raspyjack.py not found: ${RASPYJACK_DIR}/raspyjack.py"
+  say "Adding RaspyJack Return to Launcher menu hook"
+  run_as_user python3 "${REPO_DIR}/scripts/patch-raspyjack-return-hook.py" "${RASPYJACK_DIR}/raspyjack.py"
+}
+
 install_raspyjack_upstream() {
   [[ -d "${RASPYJACK_DIR}" ]] || die "RaspyJack directory not found: ${RASPYJACK_DIR}"
   prepare_raspyjack_root_alias
@@ -292,10 +306,34 @@ disable_service_units_if_present() {
   local svc=""
   for svc in "$@"; do
     [[ -n "${svc}" ]] || continue
-    if systemctl list-unit-files | grep -Fq "${svc}"; then
+    if service_unit_exists "${svc}"; then
       say "Stopping and disabling ${svc}"
       sudo systemctl stop "${svc}" || true
       sudo systemctl disable "${svc}" || true
+    else
+      warn "Service unit not found, skipping disable: ${svc}"
+    fi
+  done
+}
+
+service_unit_exists() {
+  local svc="$1"
+  [[ -n "${svc}" ]] || return 1
+  systemctl list-unit-files "${svc}" --no-legend --no-pager 2>/dev/null | awk '{print $1}' | grep -Fxq "${svc}"
+}
+
+discover_raspyjack_services() {
+  systemctl list-unit-files "raspyjack*.service" --no-legend --no-pager 2>/dev/null | awk '{print $1}' | sort -u
+}
+
+merge_unique_words() {
+  local seen=""
+  local item=""
+  for item in "$@"; do
+    [[ -n "${item}" ]] || continue
+    if [[ " ${seen} " != *" ${item} "* ]]; then
+      printf '%s\n' "${item}"
+      seen="${seen} ${item}"
     fi
   done
 }
@@ -303,7 +341,7 @@ disable_service_units_if_present() {
 configure_raspyjack_service_override() {
   local core_service="$1"
   [[ -n "${core_service}" ]] || return 0
-  if ! systemctl list-unit-files | grep -Fq "${core_service}"; then
+  if ! service_unit_exists "${core_service}"; then
     warn "RaspyJack core service not found for override: ${core_service}"
     return 0
   fi
@@ -316,7 +354,7 @@ Environment=RJ_LCD=${RASPYJACK_LCD_BACKEND}
 Environment=RJ_ROTATE=${RASPYJACK_ROTATE}
 Environment=RJ_PANEL_WIDTH=${RASPYJACK_PANEL_WIDTH}
 Environment=RJ_PANEL_HEIGHT=${RASPYJACK_PANEL_HEIGHT}
-Environment="RJ_RETURN_TO_LAUNCHER_CMD=${REPO_DIR}/stop_raspyjack.sh >/dev/null 2>&1"
+Environment="RJ_RETURN_TO_LAUNCHER_CMD=systemd-run --unit kari-rj-return --collect --same-dir /usr/bin/env bash -lc '${REPO_DIR}/stop_raspyjack.sh >/dev/null 2>&1'"
 EOF
   sudo systemctl daemon-reload
 }
@@ -347,9 +385,21 @@ install_kismet_integration() {
   say "Installing Kismet package and launcher helper"
   local ok="true"
 
+  if ! apt_package_has_candidate kismet; then
+    warn "No kismet package candidate found in the current apt sources"
+    configure_kismet_apt_repo || {
+      warn "Could not configure the official Kismet apt repository"
+      return 1
+    }
+  fi
+
   if ! sudo env DEBIAN_FRONTEND=noninteractive apt install -y kismet; then
     warn "Kismet package install failed; skipping Kismet service integration"
     return 1
+  fi
+
+  if getent group kismet >/dev/null 2>&1; then
+    sudo usermod -aG kismet "${RUN_USER}" || warn "Could not add ${RUN_USER} to kismet group"
   fi
 
   sudo install -m 0755 "${REPO_DIR}/scripts/kismet-source-autoconfig.sh" /usr/local/bin/kismet-source-autoconfig.sh || ok="false"
@@ -366,6 +416,55 @@ install_kismet_integration() {
   fi
 
   [[ "${ok}" == "true" ]]
+}
+
+apt_package_has_candidate() {
+  local package="$1"
+  apt-cache policy "${package}" 2>/dev/null | awk '/Candidate:/ { found=1; if ($2 != "(none)") ok=1 } END { exit !(found && ok) }'
+}
+
+configure_kismet_apt_repo() {
+  local os_id=""
+  local os_like=""
+  local codename=""
+  local repo_codename=""
+  local repo_channel="${KISMET_REPO_CHANNEL:-release}"
+  local apt_arch=""
+
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    os_id="${ID:-}"
+    os_like="${ID_LIKE:-}"
+    codename="${VERSION_CODENAME:-}"
+  fi
+
+  if [[ "${os_id}" == "kali" || " ${os_like} " == *" kali "* ]]; then
+    repo_codename="kali"
+  elif [[ "${codename}" == "trixie" || "${codename}" == "bookworm" ]]; then
+    repo_codename="${codename}"
+  else
+    warn "Unsupported Kismet apt repository target: ID=${os_id:-unknown} VERSION_CODENAME=${codename:-unknown}"
+    return 1
+  fi
+
+  if [[ "${repo_channel}" != "release" && "${repo_channel}" != "git" ]]; then
+    warn "Unsupported Kismet repo channel '${repo_channel}', using release"
+    repo_channel="release"
+  fi
+
+  say "Configuring official Kismet ${repo_channel} apt repository for ${repo_codename}"
+  apt_arch="$(dpkg --print-architecture 2>/dev/null || true)"
+  [[ -n "${apt_arch}" ]] || apt_arch="arm64"
+  sudo install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d
+  if ! curl -fsSL https://www.kismetwireless.net/repos/kismet-release.gpg.key | gpg --dearmor | sudo tee /usr/share/keyrings/kismet-archive-keyring.gpg >/dev/null; then
+    warn "Could not download or install Kismet apt signing key"
+    return 1
+  fi
+  printf 'deb [arch=%s signed-by=/usr/share/keyrings/kismet-archive-keyring.gpg] https://www.kismetwireless.net/repos/apt/%s/%s %s main\n' \
+    "${apt_arch}" "${repo_channel}" "${repo_codename}" "${repo_codename}" | sudo tee /etc/apt/sources.list.d/kismet.list >/dev/null
+  sudo apt update
+  apt_package_has_candidate kismet
 }
 
 install_wifite_from_source() {
@@ -585,7 +684,8 @@ managed_apps["raspyjack"].update({
     "label": "RaspyJack",
     "start_cmd": rj_start_cmd,
     "stop_cmd": rj_stop_cmd,
-    "status_cmd": f"systemctl is-active {raspyjack_core_service} {raspyjack_device_service} {raspyjack_web_service} {' '.join(raspyjack_extra_services)}".strip(),
+    "status_cmd": f"systemctl is-active {raspyjack_core_service} {raspyjack_device_service} {raspyjack_web_service}".strip(),
+    "start_grace_seconds": 20,
     "takes_over_display": True,
 })
 
@@ -662,7 +762,7 @@ PY
 
 install_launcher_services() {
   say "Installing launcher services"
-  sudo "${REPO_DIR}/install_dashboard_service.sh"
+  sudo KARI_RUN_USER="${RUN_USER}" KARI_DASH_CONFIG="${CFG_PATH}" "${REPO_DIR}/install_dashboard_service.sh"
 }
 
 install_watchdog_if_requested() {
@@ -798,9 +898,36 @@ main() {
   RASPYJACK_WEB_SERVICE="$(ask "RaspyJack web service name" "raspyjack-webui.service")"
   RASPYJACK_EXTRA_SERVICES="$(ask "Additional RaspyJack service names to stop/disable" "raspyjack-caddy-autoconfig.service raspyjack-pin-wifi.service")"
 
+  mapfile -t RASPYJACK_DISCOVERED_SERVICES < <(discover_raspyjack_services)
+  if ((${#RASPYJACK_DISCOVERED_SERVICES[@]})); then
+    say "Discovered RaspyJack service units: ${RASPYJACK_DISCOVERED_SERVICES[*]}"
+    if ! service_unit_exists "${RASPYJACK_CORE_SERVICE}" && service_unit_exists "raspyjack.service"; then
+      warn "RaspyJack core service '${RASPYJACK_CORE_SERVICE}' was not found; using discovered raspyjack.service"
+      RASPYJACK_CORE_SERVICE="raspyjack.service"
+    fi
+    if ! service_unit_exists "${RASPYJACK_DEVICE_SERVICE}" && service_unit_exists "raspyjack-device.service"; then
+      warn "RaspyJack device service '${RASPYJACK_DEVICE_SERVICE}' was not found; using discovered raspyjack-device.service"
+      RASPYJACK_DEVICE_SERVICE="raspyjack-device.service"
+    fi
+    if ! service_unit_exists "${RASPYJACK_WEB_SERVICE}" && service_unit_exists "raspyjack-webui.service"; then
+      warn "RaspyJack web service '${RASPYJACK_WEB_SERVICE}' was not found; using discovered raspyjack-webui.service"
+      RASPYJACK_WEB_SERVICE="raspyjack-webui.service"
+    fi
+    mapfile -t RASPYJACK_EXTRA_SERVICE_LIST < <(merge_unique_words ${RASPYJACK_EXTRA_SERVICES} "${RASPYJACK_DISCOVERED_SERVICES[@]}" | grep -Fvx "${RASPYJACK_CORE_SERVICE}" | grep -Fvx "${RASPYJACK_DEVICE_SERVICE}" | grep -Fvx "${RASPYJACK_WEB_SERVICE}" || true)
+    RASPYJACK_EXTRA_SERVICES="${RASPYJACK_EXTRA_SERVICE_LIST[*]:-}"
+  else
+    warn "No RaspyJack systemd units were discovered yet"
+  fi
+
   if [[ "${DISPLAY_BACKEND}" == "waveshare_1in3" ]] && [[ -d "${RASPYJACK_DIR}" ]]; then
     if ask_yes_no "Apply the bundled RaspyJack 1.3in ST7789 compatibility patch" "y"; then
       apply_raspyjack_patch_bundle
+    fi
+  fi
+
+  if [[ -d "${RASPYJACK_DIR}" ]]; then
+    if ask_yes_no "Add Return to Launcher to RaspyJack menus" "y"; then
+      apply_raspyjack_return_hook
     fi
   fi
 

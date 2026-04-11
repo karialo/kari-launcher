@@ -227,7 +227,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "label": "RaspyJack",
             "start_cmd": str(DEFAULT_LAUNCHER_DIR / "start_raspyjack.sh"),
             "stop_cmd": str(DEFAULT_LAUNCHER_DIR / "stop_raspyjack.sh"),
-            "status_cmd": "systemctl is-active raspyjack.service raspyjack-device.service raspyjack-webui.service raspyjack-caddy-autoconfig.service raspyjack-pin-wifi.service",
+            "status_cmd": "systemctl is-active raspyjack.service raspyjack-device.service raspyjack-webui.service",
+            "start_grace_seconds": 20,
             "takes_over_display": True,
         }
     },
@@ -5784,6 +5785,21 @@ class DashboardApp:
         self.status_note_expires = time.monotonic() + max(0.5, hold_seconds)
         self._request_redraw()
 
+    def _show_handoff_screen(self, title: str, detail: str = "") -> None:
+        theme = self.theme
+        self.screen.fill(theme.bg)
+        w, h = self.screen.get_size()
+        card = pygame.Rect(18, 60, max(1, w - 36), 118)
+        self._draw_card(card, theme, alt=False)
+        self._blit_text(clean_text(title, 24), 22, theme.neon_primary, (card.x + 16, card.y + 18))
+        if detail:
+            self._blit_text(clean_text(detail, 34), 15, theme.text, (card.x + 16, card.y + 54))
+        self._blit_text("please wait", 13, theme.dim_text, (card.x + 16, card.y + 84))
+        try:
+            self._update_display()
+        except Exception:
+            pass
+
     def _draw_footer(self, theme: Theme, page: str) -> None:
         text = self._footer_text(page)
         self._blit_text(clean_text(text, 38), 11, theme.dim_text, (8, 222))
@@ -6674,8 +6690,6 @@ class DashboardApp:
     def _suspend_for_app(self, app_id: str) -> None:
         self.suspended_app_id = app_id
         self.suspended_started_at = time.monotonic()
-        self.screen.fill((0, 0, 0))
-        self._update_display()
         if self.input_backend is not None:
             self.input_backend.suspend()
         self._set_status(f"{app_id} active", 4.0)
@@ -6693,13 +6707,22 @@ class DashboardApp:
         if self._managed_app_running(app_id):
             self._suspend_for_app(app_id)
             return
+        label = clean_text(self._managed_app_cfg(app_id).get("label", app_id), 28)
+        self._show_handoff_screen(f"Starting {label}", "preparing display handoff")
         if not self._run_managed_app_cmd(app_id, "start_cmd"):
             return
-        time.sleep(1.2)
-        if self._managed_app_running(app_id):
-            self._suspend_for_app(app_id)
-        else:
-            self._set_status(f"{app_id} did not start", 6.0)
+        cfg = self._managed_app_cfg(app_id)
+        try:
+            grace_seconds = float(cfg.get("start_grace_seconds", 8.0))
+        except Exception:
+            grace_seconds = 8.0
+        deadline = time.monotonic() + max(1.2, min(45.0, grace_seconds))
+        while time.monotonic() < deadline:
+            if self._managed_app_running(app_id):
+                self._suspend_for_app(app_id)
+                return
+            time.sleep(0.4)
+        self._set_status(f"{app_id} still starting", 6.0)
 
     def _stop_managed_app(self, app_id: str) -> None:
         if not self._managed_app_running(app_id):

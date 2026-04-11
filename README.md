@@ -249,7 +249,7 @@ What it handles:
 - optional Wifite2 source install plus common helper packages when available on the OS
 - optional Kismet package install plus launcher-side source policy; package install failure is reported and the wizard continues
 - optional RaspyJack `1.3in` patch application after RaspyJack has been installed
-- optional RaspyJack service disable, wrapper command wiring, and launcher-return override after its services exist
+- optional RaspyJack service disable, wrapper command wiring, return-menu hook, and launcher-return override after its services exist
 - launcher and watchdog service installation
 
 ### 1. Start with a sane Pi
@@ -497,7 +497,7 @@ The DIY installer can do the package path for you:
 Install Kismet package and launcher source-policy override [Y/n]:
 ```
 
-That installs the distro `kismet` package, installs the launcher source autoconfig helper, installs the `kismet.service` drop-in, reloads systemd, enables the service, and restarts it. If the distro package is missing or apt refuses the install, the DIY installer warns, keeps going, and leaves `kismet.service` in the launcher config as a placeholder to fix later. Cloning upstream Kismet source is a separate optional reference/build step, not the main install path.
+That installs the distro `kismet` package, installs the launcher source autoconfig helper, installs the `kismet.service` drop-in, reloads systemd, enables the service, and restarts it. If the base OS has no `kismet` apt candidate, the DIY installer adds the official Kismet apt repository for supported Debian/Kali codenames, constrained to the device's current apt architecture, refreshes apt, and retries the package install. If apt still refuses the install, the installer warns, keeps going, and leaves `kismet.service` in the launcher config as a placeholder to fix later. Cloning upstream Kismet source is a separate optional reference/build step, not the main install path.
 
 Then confirm the launcher config matches reality:
 
@@ -586,6 +586,14 @@ sudo systemctl disable raspyjack.service raspyjack-device.service raspyjack-webu
 That is not hostility toward RaspyJack. It is just the cleanest way to stop two different display-owning stacks from both deciding they are in charge at boot.
 
 The stock wrappers use the same five-service default. If your RaspyJack install uses different names, set `RJ_CORE_SERVICE`, `RJ_DEVICE_SERVICE`, `RJ_WEB_SERVICE`, and `RJ_EXTRA_SERVICES`; the DIY installer writes those environment values into the generated launcher commands from your answers.
+
+During DIY install, the script also auto-discovers `raspyjack*.service` units immediately after the upstream RaspyJack installer runs. That catches helper units added by RaspyJack and reduces the chance that a typo at the prompt leaves the real services enabled.
+
+The DIY installer also applies a small post-install RaspyJack edit for `Return to Launcher`. It patches the installed `raspyjack.py` in place, adds `Return to Launcher` to the main and `System` menus, and calls the `RJ_RETURN_TO_LAUNCHER_CMD` supplied by the launcher systemd drop-in. This is intentionally narrower than replacing RaspyJack's whole main file, so newer upstream RaspyJack code is kept.
+
+RaspyJack can take several seconds to become fully active after systemd starts it. The launcher therefore uses a `managed_apps.raspyjack.start_grace_seconds` window before deciding that the handoff failed.
+
+While that handoff is in progress, the launcher paints a local `Starting RaspyJack` screen and leaves it on the panel until RaspyJack takes over the display. On the way back, the stock stop wrapper tries to paint a small `Returning to launcher` / `Starting launcher` message before restarting `kari-dashboard.service`, so the user is not left staring at the last RaspyJack menu while systemd is switching owners.
 
 ### 8. Install the launcher service
 
@@ -1091,6 +1099,8 @@ Tutorial:
 3. Adapt the wrapper scripts for your own paths and service names.
 4. Point `managed_apps.raspyjack` at those wrappers.
 5. Test start and stop from the launcher.
+
+The start path deliberately treats RaspyJack as slow-starting: it shows a handoff screen, starts the wrapper detached from `kari-dashboard.service`, and waits through `managed_apps.raspyjack.start_grace_seconds` before declaring failure. The return path uses the RaspyJack `Return to Launcher` hook or the launcher stop action to call [stop_raspyjack.sh](./stop_raspyjack.sh), which stops the RaspyJack services and brings `kari-dashboard.service` back up.
 
 Warnings:
 

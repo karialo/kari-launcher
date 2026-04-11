@@ -3,12 +3,21 @@ set -Eeuo pipefail
 
 SERVICE_NAMES=("kari-bootscreen.service" "kari-dashboard.service" "termie.service")
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_USER="${SUDO_USER:-${USER:-pi}}"
+RUN_USER="${KARI_RUN_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
+if [[ "${RUN_USER}" == "root" ]]; then
+  REPO_OWNER="$(stat -c '%U' "${HERE}" 2>/dev/null || true)"
+  if [[ -n "${REPO_OWNER}" && "${REPO_OWNER}" != "root" ]]; then
+    RUN_USER="${REPO_OWNER}"
+  else
+    echo "Could not infer the non-root launcher user; rerun with KARI_RUN_USER=<username>"
+    exit 1
+  fi
+fi
 RUN_HOME="$(getent passwd "${RUN_USER}" | cut -d: -f6 || true)"
 if [[ -z "${RUN_HOME}" ]]; then
   RUN_HOME="/home/${RUN_USER}"
 fi
-CFG_PATH="${RUN_HOME}/.config/launcher/dashboard.json"
+CFG_PATH="${KARI_DASH_CONFIG:-${RUN_HOME}/.config/launcher/dashboard.json}"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run as root: sudo ./install_dashboard_service.sh"
