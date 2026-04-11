@@ -16,6 +16,7 @@ RESULTS_DIR="${RUN_HOME}/Results"
 RASPYJACK_DIR="${PROJECTS_DIR}/Raspyjack"
 ANGRYOXIDE_DIR="${PROJECTS_DIR}/AngryOxide"
 KISMET_DIR="${PROJECTS_DIR}/kismet"
+WIFITE_DIR="${PROJECTS_DIR}/wifite2"
 VENV_DIR="${REPO_DIR}/.venv"
 PYTHON_BIN="${VENV_DIR}/bin/python"
 PIP_BIN="${VENV_DIR}/bin/pip"
@@ -24,6 +25,9 @@ APT_PACKAGES=(
   git
   curl
   util-linux
+  iw
+  wireless-tools
+  aircrack-ng
   build-essential
   python3
   python3-dev
@@ -88,12 +92,12 @@ ask_choice() {
   local default="$1"
   shift
   local answer=""
-  printf '%s\n' "${prompt}"
+  printf '%s\n' "${prompt}" >&2
   while (($#)); do
-    printf '  - %s\n' "$1"
+    printf '  - %s\n' "$1" >&2
     shift
   done
-  read -r -p "Choice [${default}]: " answer
+  read -r -p "Choice [${default}]: " answer >&2
   printf '%s' "${answer:-$default}"
 }
 
@@ -172,6 +176,24 @@ clone_repo_if_needed() {
   git clone --depth 1 "${url}" "${dest}"
 }
 
+apt_install_available() {
+  local packages=("$@")
+  local installable=()
+  local pkg=""
+
+  for pkg in "${packages[@]}"; do
+    if apt-cache show "${pkg}" >/dev/null 2>&1; then
+      installable+=("${pkg}")
+    else
+      warn "APT package not available on this OS/release, skipping: ${pkg}"
+    fi
+  done
+
+  if ((${#installable[@]})); then
+    sudo apt install -y "${installable[@]}"
+  fi
+}
+
 backup_file_if_present() {
   local path="$1"
   [[ -f "${path}" ]] || return 0
@@ -185,6 +207,30 @@ apply_raspyjack_patch_bundle() {
     backup_file_if_present "${RASPYJACK_DIR}/${f}"
     install -m 0644 "${REPO_DIR}/third_party/raspyjack_patch/files/${f}" "${RASPYJACK_DIR}/${f}"
   done
+}
+
+install_raspyjack_upstream() {
+  [[ -d "${RASPYJACK_DIR}" ]] || die "RaspyJack directory not found: ${RASPYJACK_DIR}"
+
+  local installer=""
+  for candidate in install_raspyjack.sh install.sh setup.sh; do
+    if [[ -f "${RASPYJACK_DIR}/${candidate}" ]]; then
+      installer="${RASPYJACK_DIR}/${candidate}"
+      break
+    fi
+  done
+
+  if [[ -z "${installer}" ]]; then
+    warn "No RaspyJack installer found in ${RASPYJACK_DIR}; expected install_raspyjack.sh, install.sh, or setup.sh"
+    return 0
+  fi
+
+  say "Running RaspyJack upstream installer: ${installer}"
+  (
+    cd "${RASPYJACK_DIR}"
+    sudo bash "${installer}"
+  )
+  sudo systemctl daemon-reload || true
 }
 
 disable_service_units_if_present() {
@@ -253,6 +299,37 @@ install_kismet_integration() {
   sudo systemctl restart kismet.service || true
 }
 
+install_wifite_from_source() {
+  [[ -d "${WIFITE_DIR}" ]] || die "Wifite2 directory not found: ${WIFITE_DIR}"
+
+  say "Installing Wifite2 helper tools when available"
+  apt_install_available \
+    aircrack-ng \
+    wireless-tools \
+    net-tools \
+    reaver \
+    bully \
+    tshark \
+    cowpatty \
+    hashcat \
+    hcxtools \
+    hcxdumptool \
+    macchanger
+
+  if [[ -f "${WIFITE_DIR}/setup.py" ]]; then
+    say "Installing Wifite2 from source"
+    (
+      cd "${WIFITE_DIR}"
+      sudo python3 setup.py install
+    )
+  elif [[ -f "${WIFITE_DIR}/Wifite.py" ]]; then
+    say "Installing Wifite2 script wrapper"
+    sudo install -m 0755 "${WIFITE_DIR}/Wifite.py" /usr/local/sbin/wifite
+  else
+    warn "Wifite2 clone does not contain setup.py or Wifite.py: ${WIFITE_DIR}"
+  fi
+}
+
 write_config_values() {
   say "Applying launcher config"
   CFG_PATH="${CFG_PATH}" \
@@ -274,6 +351,7 @@ write_config_values() {
   RASPYJACK_DEVICE_SERVICE="${RASPYJACK_DEVICE_SERVICE}" \
   RASPYJACK_WEB_SERVICE="${RASPYJACK_WEB_SERVICE}" \
   ANGRYOXIDE_CMD="${ANGRYOXIDE_CMD}" \
+  WIFITE_RUN_COMMAND="${WIFITE_RUN_COMMAND}" \
   RESULTS_DIR="${RESULTS_DIR}" \
   INSTALL_KISMET="${INSTALL_KISMET}" \
   KISMET_SERVICE_NAME="${KISMET_SERVICE_NAME}" \
@@ -301,6 +379,7 @@ raspyjack_core_service = os.environ["RASPYJACK_CORE_SERVICE"]
 raspyjack_device_service = os.environ["RASPYJACK_DEVICE_SERVICE"]
 raspyjack_web_service = os.environ["RASPYJACK_WEB_SERVICE"]
 angryoxide_cmd = os.environ["ANGRYOXIDE_CMD"]
+wifite_run_command = os.environ["WIFITE_RUN_COMMAND"]
 local_buttons = os.environ["LOCAL_BUTTONS"].lower() in {"1", "true", "yes", "on"}
 remote_port = int(os.environ["REMOTE_PORT"])
 remote_token = os.environ["REMOTE_TOKEN"]
@@ -362,6 +441,8 @@ foxhunt["interface"] = monitor_iface
 
 wifite = data.setdefault("wifite", {})
 wifite["interface"] = monitor_iface
+if wifite_run_command:
+    wifite["run_command"] = wifite_run_command
 
 nmap = data.setdefault("nmap", {})
 nmap["interface"] = primary_iface
@@ -406,6 +487,9 @@ install_watchdog_if_requested() {
 verify_external_plumbing() {
   say "Verifying external tool plumbing"
   verify_command_or_path "AngryOxide command" "${ANGRYOXIDE_CMD}" || true
+  if [[ -n "${WIFITE_RUN_COMMAND}" ]]; then
+    verify_command_or_path "Wifite run command" "${WIFITE_RUN_COMMAND}" || true
+  fi
 
   if [[ -d "${RASPYJACK_DIR}" ]]; then
     [[ -f "${RASPYJACK_DIR}/raspyjack.py" ]] || warn "RaspyJack root does not contain raspyjack.py: ${RASPYJACK_DIR}"
@@ -436,6 +520,8 @@ show_summary() {
   printf 'RaspyJack dir: %s\n' "${RASPYJACK_DIR}"
   printf 'RaspyJack services: %s %s %s\n' "${RASPYJACK_CORE_SERVICE}" "${RASPYJACK_DEVICE_SERVICE}" "${RASPYJACK_WEB_SERVICE}"
   printf 'AngryOxide command: %s\n' "${ANGRYOXIDE_CMD}"
+  printf 'Wifite dir: %s\n' "${WIFITE_DIR}"
+  printf 'Wifite run command: %s\n' "${WIFITE_RUN_COMMAND:-<blank>}"
   printf 'Kismet integration: %s\n' "${INSTALL_KISMET}"
   printf 'Launcher service install: %s\n' "${INSTALL_SERVICES}"
   printf 'Watchdog install: %s\n' "${INSTALL_WATCHDOG}"
@@ -507,8 +593,18 @@ main() {
     REMOTE_TOKEN="$(ask_secret "Remote token")"
   fi
 
+  RASPYJACK_WAS_CLONED="false"
   if ask_yes_no "Clone RaspyJack upstream into ${RASPYJACK_DIR}" "n"; then
+    RASPYJACK_WAS_CLONED="true"
     clone_repo_if_needed "https://github.com/7h30th3r0n3/Raspyjack.git" "${RASPYJACK_DIR}"
+  fi
+
+  if [[ -d "${RASPYJACK_DIR}" ]]; then
+    RASPYJACK_INSTALL_DEFAULT="n"
+    [[ "${RASPYJACK_WAS_CLONED}" == "true" ]] && RASPYJACK_INSTALL_DEFAULT="y"
+    if ask_yes_no "Run the RaspyJack installer before applying launcher overrides" "${RASPYJACK_INSTALL_DEFAULT}"; then
+      install_raspyjack_upstream
+    fi
   fi
 
   RASPYJACK_CORE_SERVICE="$(ask "RaspyJack core service name" "raspyjack.service")"
@@ -533,21 +629,36 @@ main() {
     clone_repo_if_needed "https://github.com/Ragnt/AngryOxide.git" "${ANGRYOXIDE_DIR}"
   fi
 
-  if ask_yes_no "Clone Kismet upstream source into ${KISMET_DIR}" "n"; then
-    clone_repo_if_needed "https://github.com/kismetwireless/kismet.git" "${KISMET_DIR}"
+  WIFITE_WAS_CLONED="false"
+  if ask_yes_no "Clone Wifite2 upstream into ${WIFITE_DIR}" "n"; then
+    WIFITE_WAS_CLONED="true"
+    clone_repo_if_needed "https://github.com/derv82/wifite2.git" "${WIFITE_DIR}"
+  fi
+  if [[ -d "${WIFITE_DIR}" ]]; then
+    WIFITE_INSTALL_DEFAULT="n"
+    [[ "${WIFITE_WAS_CLONED}" == "true" ]] && WIFITE_INSTALL_DEFAULT="y"
+    if ask_yes_no "Install Wifite2 from ${WIFITE_DIR}" "${WIFITE_INSTALL_DEFAULT}"; then
+      install_wifite_from_source
+    fi
   fi
 
   ANGRYOXIDE_CMD="$(ask "AngryOxide command path" "${RUN_HOME}/bin/angryoxide -i ${MONITOR_IFACE}")"
+  DEFAULT_WIFITE_RUN_COMMAND="sudo wifite -i ${MONITOR_IFACE} -b "'$WIFITE_TARGET_BSSID'" -c "'$WIFITE_TARGET_CHANNEL'" --kill"
+  WIFITE_RUN_COMMAND="$(ask "Wifite run command template (blank to leave disabled)" "${DEFAULT_WIFITE_RUN_COMMAND}")"
 
   ensure_base_config
 
   KISMET_SERVICE_NAME="kismet.service"
   INSTALL_KISMET="false"
-  if ask_yes_no "Install Kismet package and launcher source-policy override" "n"; then
+  if ask_yes_no "Install Kismet package and launcher source-policy override" "y"; then
     INSTALL_KISMET="true"
     install_kismet_integration
   else
     KISMET_SERVICE_NAME="$(ask "Existing Kismet service name" "kismet.service")"
+  fi
+
+  if ask_yes_no "Clone Kismet upstream source into ${KISMET_DIR} for reference/build work" "n"; then
+    clone_repo_if_needed "https://github.com/kismetwireless/kismet.git" "${KISMET_DIR}"
   fi
 
   REPO_DIR="${REPO_DIR}" write_config_values

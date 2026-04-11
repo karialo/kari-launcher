@@ -243,10 +243,12 @@ What it handles:
 - first-run config generation
 - display selection: `1.3in` or `1.44in`
 - `wlan0` maintenance Wi-Fi setup through `nmcli`
-- optional RaspyJack / AngryOxide / Kismet upstream clones
+- optional RaspyJack / AngryOxide / Wifite2 / Kismet upstream clones
+- optional RaspyJack installer run immediately after cloning
+- optional Wifite2 source install plus common helper packages when available on the OS
 - optional Kismet package install plus launcher-side source policy
-- optional RaspyJack `1.3in` patch application
-- optional RaspyJack service disable and launcher-return override
+- optional RaspyJack `1.3in` patch application after RaspyJack has been installed
+- optional RaspyJack service disable and launcher-return override after its services exist
 - launcher and watchdog service installation
 
 ### 1. Start with a sane Pi
@@ -328,6 +330,17 @@ If you are wiring the box by hand instead of using `./DIYinstall.sh`, set the ha
 - `waveshare_1in44` for the `128x128` ST7735 panel
 
 The `1.3in` path is the intended launcher build. The `1.44in` path is a compatibility route that scales the current launcher UI down to fit.
+
+The DIY installer prints the display choices explicitly before it reads the answer:
+
+```text
+Select the launcher display target
+  - 1.3 = Waveshare 1.3in 240x240 (recommended)
+  - 1.44 = Waveshare 1.44in 128x128 (scaled launcher UI, less readable)
+Choice [1.3]:
+```
+
+If you press enter, it chooses `1.3`.
 
 The launcher is now display-aware at config level:
 
@@ -476,6 +489,14 @@ What that helper currently does:
 - otherwise leaves Wi-Fi capture manual instead of silently stealing `wlan1`
 
 If your box uses different interface names, edit [kismet-source-autoconfig.sh](./scripts/kismet-source-autoconfig.sh). Do not keep our `wlan2` policy on your machine out of nostalgia.
+
+The DIY installer can do the package path for you:
+
+```text
+Install Kismet package and launcher source-policy override [Y/n]:
+```
+
+That installs the distro `kismet` package, installs the launcher source autoconfig helper, installs the `kismet.service` drop-in, reloads systemd, enables the service, and restarts it. Cloning upstream Kismet source is a separate optional reference/build step, not the main install path.
 
 Then confirm the launcher config matches reality:
 
@@ -971,7 +992,9 @@ What it does:
 - stages target SSID / BSSID / channel / security
 - lets you pick the external interface used for passive scans
 - runs `wifite.run_command`
-- captures stdout/stderr into the page and web UI
+- injects target metadata into the environment
+- strips ANSI output before rendering
+- batches stdout/stderr into the page and web UI
 
 Environment exported to the configured command:
 
@@ -1003,9 +1026,22 @@ Example:
   "interface": "wlan1",
   "scan_max_results": 32,
   "scan_interval_active_seconds": 4.0,
-  "run_command": "/home/<user>/.local/bin/sd-list"
+  "run_command": "sudo wifite -i wlan1 -b $WIFITE_TARGET_BSSID -c $WIFITE_TARGET_CHANNEL --kill"
 }
 ```
+
+The DIY installer can clone and install Wifite2 from the current upstream repository:
+
+```text
+Clone Wifite2 upstream into /home/<user>/Projects/wifite2 [y/N]:
+Install Wifite2 from /home/<user>/Projects/wifite2 [Y/n]:
+```
+
+It uses:
+
+- <https://github.com/derv82/wifite2>
+
+When that install path is selected, the installer also attempts to install common Wifite helper packages that exist on the current OS release, such as `aircrack-ng`, `reaver`, `bully`, `tshark`, `hcxtools`, `hcxdumptool`, and `macchanger`. Missing packages are skipped with a warning instead of aborting the whole launcher install.
 
 ## Pika
 
