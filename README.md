@@ -98,7 +98,8 @@ kari-launcher/
 │  └─ watchdog
 ├─ scripts/
 │  ├─ kismet-source-autoconfig.sh
-│  └─ kismet.service.override.conf
+│  ├─ kismet.service.override.conf
+│  └─ tailscalesetup.sh
 ├─ src/launcher/
 │  ├─ dashboard.py
 │  ├─ foxhunt.py
@@ -242,6 +243,10 @@ What it handles:
 - launcher venv creation
 - first-run config generation
 - display selection: `1.3in` or `1.44in`
+- radio identity rules so the onboard Broadcom maintenance radio stays `wlan0`
+- NetworkManager policy so Wi-Fi stays managed while USB gadget Ethernet stays out of NM's way
+- monitor-mode adapter support for common field radios
+- optional Tailscale installation/enrollment for remote maintenance
 - `wlan0` maintenance Wi-Fi setup through `nmcli`
 - optional RaspyJack / AngryOxide / Wifite2 / Kismet upstream clones
 - optional RaspyJack installer run immediately after cloning
@@ -358,6 +363,50 @@ If someone wants to turn the `1.44in` path from "works" into "actually feels des
 - audit every page with long lists or multi-line summaries
 
 In other words: the current `1.44in` support is display-aware and honest, but it is not yet a dedicated `128x128` UX pass.
+
+### Radio identity and monitor drivers
+
+The DIY installer now treats stable radio identity as a first-class install step:
+
+```text
+Install K.A.R.I radio naming and NetworkManager rules [Y/n]:
+Install monitor-mode adapter driver support [Y/n]:
+Driver set (space separated: rtl8812au rtl8821au rtl88x2bu rtl8821cu ath9k_htc mt76) [...]
+```
+
+The naming step writes:
+
+- `/etc/systemd/network/10-kari-onboard-wifi.link`
+- `/etc/systemd/network/11-kari-monitor-wifi.link` when the selected capture interface exists during install and is not already in monitor mode
+- `/etc/udev/rules.d/70-kari-wifi-names.rules`
+- `/etc/udev/rules.d/99-kari-nm-managed.rules`
+
+The important policy is simple: the internal Raspberry Pi Broadcom radio is the maintenance link and should remain `wlan0`. External USB radios are capture radios and are discovered by the launcher inventory.
+
+The default driver set covers the current known-good family:
+
+- `rtl8812au`: Alfa AWUS036ACH / RTL8812AU-class adapters
+- `rtl8821au`: RTL8811AU / RTL8821AU adapters, including TP-Link Archer T2U Nano class devices
+- `ath9k_htc`: Atheros AR9271 adapters such as TL-WN722N v1, handled by the kernel driver plus firmware
+- `mt76`: MediaTek USB adapters such as MT7610U, handled by the kernel `mt76` stack on current Raspberry Pi OS
+
+Optional extra tokens are available for common Realtek USB adapters:
+
+- `rtl88x2bu`
+- `rtl8821cu`
+
+Realtek DKMS builds are cloned under `~/Projects/drivers`. Kernel-backed adapters still go through the same installer step so firmware packages are requested through apt.
+
+### Tailscale
+
+The DIY installer can install Tailscale through [tailscalesetup.sh](./scripts/tailscalesetup.sh):
+
+```text
+Install Tailscale for remote maintenance access [Y/n]:
+Tailscale auth key (blank to install only):
+```
+
+If you provide an auth key, the script runs `tailscale up` with SSH enabled and the current hostname. If you leave it blank, it installs and starts `tailscaled`, then prints the manual enrollment command.
 
 ### 3. Run it once and let it write the real config
 

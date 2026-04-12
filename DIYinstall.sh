@@ -30,6 +30,7 @@ PIP_BIN="${VENV_DIR}/bin/pip"
 APT_PACKAGES=(
   git
   curl
+  ca-certificates
   gnupg
   util-linux
   iw
@@ -46,12 +47,47 @@ APT_PACKAGES=(
   network-manager
 )
 
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_DIM=$'\033[2m'
+  C_GREEN=$'\033[32m'
+  C_CYAN=$'\033[36m'
+  C_YELLOW=$'\033[33m'
+  C_RED=$'\033[31m'
+else
+  C_RESET=""
+  C_BOLD=""
+  C_DIM=""
+  C_GREEN=""
+  C_CYAN=""
+  C_YELLOW=""
+  C_RED=""
+fi
+
+banner() {
+  printf '\n%s' "${C_BOLD}${C_CYAN}"
+  cat <<'EOF'
+K.A.R.I DIY Installer
+Fresh Pi -> pocket network testing tool
+EOF
+  printf '%s\n' "${C_RESET}"
+}
+
+section() {
+  printf '\n%s== %s ==%s\n' "${C_BOLD}${C_CYAN}" "$*" "${C_RESET}"
+}
+
 say() {
-  printf '\n[%s] %s\n' "DIY" "$*"
+  printf '%s->%s %s\n' "${C_GREEN}" "${C_RESET}" "$*"
+}
+
+note() {
+  printf '%s::%s %s\n' "${C_DIM}" "${C_RESET}" "$*"
 }
 
 warn() {
-  printf '\n[%s] %s\n' "warn" "$*" >&2
+  printf '%s!!%s %s\n' "${C_YELLOW}" "${C_RESET}" "$*" >&2
 }
 
 die() {
@@ -72,10 +108,10 @@ ask() {
   local default="${2:-}"
   local answer=""
   if [[ -n "${default}" ]]; then
-    read -r -p "${prompt} [${default}]: " answer
+    read -r -p "${C_BOLD}${prompt}${C_RESET} [${default}]: " answer
     printf '%s' "${answer:-$default}"
   else
-    read -r -p "${prompt}: " answer
+    read -r -p "${C_BOLD}${prompt}${C_RESET}: " answer
     printf '%s' "${answer}"
   fi
 }
@@ -83,7 +119,7 @@ ask() {
 ask_secret() {
   local prompt="$1"
   local answer=""
-  read -r -s -p "${prompt}: " answer
+  read -r -s -p "${C_BOLD}${prompt}${C_RESET}: " answer
   printf '\n' >&2
   printf '%s' "${answer}"
 }
@@ -96,7 +132,7 @@ ask_yes_no() {
   if [[ "${default}" == "n" ]]; then
     suffix="[y/N]"
   fi
-  read -r -p "${prompt} ${suffix}: " answer
+  read -r -p "${C_BOLD}${prompt}${C_RESET} ${suffix}: " answer
   answer="${answer:-$default}"
   [[ "${answer}" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]
 }
@@ -107,9 +143,9 @@ ask_choice() {
   local default="$1"
   shift
   local answer=""
-  printf '%s\n' "${prompt}" >&2
+  printf '%s%s%s\n' "${C_BOLD}" "${prompt}" "${C_RESET}" >&2
   while (($#)); do
-    printf '  - %s\n' "$1" >&2
+    printf '  %s-%s %s\n' "${C_CYAN}" "${C_RESET}" "$1" >&2
     shift
   done
   read -r -p "Choice [${default}]: " answer >&2
@@ -124,12 +160,14 @@ ensure_sudo() {
 }
 
 install_apt_packages() {
+  section "System Packages"
   say "Installing launcher prerequisites"
   sudo apt update
   sudo apt install -y "${APT_PACKAGES[@]}"
 }
 
 create_directories() {
+  section "Directories"
   say "Creating user directories"
   mkdir -p "${PROJECTS_DIR}" "${RESULTS_DIR}" "${CFG_DIR}"
   if [[ "$(id -u)" -eq 0 && "${RUN_USER}" != "root" ]]; then
@@ -138,6 +176,7 @@ create_directories() {
 }
 
 setup_venv() {
+  section "Python"
   say "Creating launcher virtual environment"
   if [[ "$(id -u)" -eq 0 && "${RUN_USER}" != "root" && -d "${VENV_DIR}" ]]; then
     chown -R "${RUN_USER}:${RUN_USER}" "${VENV_DIR}" || true
@@ -148,6 +187,7 @@ setup_venv() {
 }
 
 ensure_base_config() {
+  section "Launcher Config"
   say "Writing launcher config scaffold"
   run_as_user env CFG_PATH="${CFG_PATH}" PYTHONPATH="${REPO_DIR}/src" "${PYTHON_BIN}" - <<'PY'
 from pathlib import Path
@@ -183,6 +223,125 @@ configure_nmcli_wifi() {
   sudo nmcli connection up "${profile}" ifname "${iface}" || true
 }
 
+detect_iface_driver() {
+  local iface="$1"
+  local driver=""
+  driver="$(readlink -f "/sys/class/net/${iface}/device/driver" 2>/dev/null || true)"
+  basename "${driver}" 2>/dev/null || true
+}
+
+detect_onboard_wifi_iface() {
+  local iface=""
+  for path in /sys/class/net/*; do
+    iface="$(basename "${path}")"
+    [[ "${iface}" == wl* ]] || continue
+    if [[ "$(detect_iface_driver "${iface}")" == "brcmfmac" ]]; then
+      printf '%s' "${iface}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect_iface_mac() {
+  local iface="$1"
+  [[ -r "/sys/class/net/${iface}/address" ]] || return 1
+  tr '[:upper:]' '[:lower:]' <"/sys/class/net/${iface}/address"
+}
+
+detect_iface_type() {
+  local iface="$1"
+  command -v iw >/dev/null 2>&1 || return 1
+  iw dev "${iface}" info 2>/dev/null | awk '/^[[:space:]]*type / {print $2; exit}'
+}
+
+install_text_root() {
+  local mode="$1"
+  local path="$2"
+  local tmp=""
+  tmp="$(mktemp)"
+  cat >"${tmp}"
+  sudo install -m "${mode}" "${tmp}" "${path}"
+  rm -f "${tmp}"
+}
+
+configure_wifi_identity() {
+  section "Radio Identity"
+  say "Pinning the onboard Broadcom radio to ${PRIMARY_IFACE}"
+
+  local onboard_iface=""
+  local onboard_mac=""
+  local monitor_mac=""
+  onboard_iface="$(detect_onboard_wifi_iface || true)"
+  if [[ -n "${onboard_iface}" ]]; then
+    onboard_mac="$(detect_iface_mac "${onboard_iface}" || true)"
+  fi
+
+  sudo install -d -m 0755 /etc/systemd/network /etc/udev/rules.d
+
+  if [[ -n "${onboard_mac}" ]]; then
+    install_text_root 0644 /etc/systemd/network/10-kari-onboard-wifi.link <<EOF
+[Match]
+MACAddress=${onboard_mac}
+
+[Link]
+Name=${PRIMARY_IFACE}
+EOF
+  else
+    warn "Could not read onboard Broadcom MAC; falling back to driver match"
+    install_text_root 0644 /etc/systemd/network/10-kari-onboard-wifi.link <<EOF
+[Match]
+Driver=brcmfmac
+
+[Link]
+Name=${PRIMARY_IFACE}
+EOF
+  fi
+
+  if [[ -e "/sys/class/net/${MONITOR_IFACE}" && "${MONITOR_IFACE}" != "${PRIMARY_IFACE}" ]]; then
+    if [[ "$(detect_iface_type "${MONITOR_IFACE}" || true)" == "monitor" ]]; then
+      warn "${MONITOR_IFACE} is already in monitor mode; not writing a permanent MAC pin from a possibly modified address"
+      monitor_mac=""
+    else
+      monitor_mac="$(detect_iface_mac "${MONITOR_IFACE}" || true)"
+    fi
+    if [[ -n "${monitor_mac}" ]]; then
+      say "Pinning currently attached capture radio to ${MONITOR_IFACE}"
+      install_text_root 0644 /etc/systemd/network/11-kari-monitor-wifi.link <<EOF
+[Match]
+MACAddress=${monitor_mac}
+
+[Link]
+Name=${MONITOR_IFACE}
+EOF
+    fi
+  else
+    note "No live ${MONITOR_IFACE} found to pin by MAC; USB radios will still be managed by the launcher inventory."
+  fi
+
+  install_text_root 0644 /etc/udev/rules.d/70-kari-wifi-names.rules <<EOF
+# K.A.R.I: keep the internal Broadcom maintenance radio stable.
+ACTION=="add", SUBSYSTEM=="net", DRIVERS=="brcmfmac", NAME="${PRIMARY_IFACE}"
+EOF
+
+  install_text_root 0644 /etc/udev/rules.d/99-kari-nm-managed.rules <<'EOF'
+# Keep Wi-Fi interfaces managed by NetworkManager.
+ACTION=="add|change", SUBSYSTEM=="net", KERNEL=="wlan*", ENV{NM_UNMANAGED}="0"
+ACTION=="add|change", SUBSYSTEM=="net", KERNEL=="wl*", ENV{NM_UNMANAGED}="0"
+
+# Keep USB gadget Ethernet links unmanaged by NM; gadget setup usually owns IPs directly.
+ACTION=="add|change", SUBSYSTEM=="net", ENV{ID_NET_DRIVER}=="g_ether",    ENV{NM_UNMANAGED}="1"
+ACTION=="add|change", SUBSYSTEM=="net", ENV{ID_NET_DRIVER}=="cdc_ether",  ENV{NM_UNMANAGED}="1"
+ACTION=="add|change", SUBSYSTEM=="net", ENV{ID_NET_DRIVER}=="rndis_host", ENV{NM_UNMANAGED}="1"
+ACTION=="add|change", SUBSYSTEM=="net", ENV{ID_NET_DRIVER}=="cdc_ncm",    ENV{NM_UNMANAGED}="1"
+ACTION=="add|change", SUBSYSTEM=="net", KERNEL=="usb0", ENV{NM_UNMANAGED}="1"
+EOF
+
+  sudo udevadm control --reload-rules || true
+  sudo systemctl restart systemd-udevd.service 2>/dev/null || true
+  warn "Interface naming changes are most reliable after reboot. Keep SSH open until ${PRIMARY_IFACE} is verified."
+}
+
 clone_repo_if_needed() {
   local url="$1"
   local dest="$2"
@@ -213,6 +372,182 @@ clone_repo_with_submodules_if_needed() {
     return 0
   fi
   run_as_user git clone --recurse-submodules --depth 1 "${url}" "${dest}"
+}
+
+update_repo_if_needed() {
+  local dest="$1"
+  if [[ -d "${dest}/.git" ]]; then
+    (
+      cd "${dest}"
+      run_as_user git pull --ff-only || warn "Could not update ${dest}; keeping existing checkout"
+    )
+  fi
+}
+
+prepare_driver_build_packages() {
+  section "Monitor Drivers"
+  say "Installing driver build and firmware packages"
+  apt_install_available \
+    dkms \
+    bc \
+    build-essential \
+    libelf-dev \
+    raspberrypi-kernel-headers \
+    "linux-headers-$(uname -r)" \
+    linux-headers-rpi-v8 \
+    linux-headers-rpi-v7 \
+    linux-headers-rpi-v6 \
+    firmware-realtek \
+    firmware-atheros \
+    firmware-misc-nonfree \
+    usb-modeswitch
+}
+
+prepare_aircrack_rpi_platform() {
+  local dest="$1"
+  [[ -f "${dest}/Makefile" ]] || return 0
+  if [[ "$(uname -m)" == "aarch64" ]]; then
+    sudo sed -i \
+      -e 's/^CONFIG_PLATFORM_I386_PC = y/CONFIG_PLATFORM_I386_PC = n/' \
+      -e 's/^CONFIG_PLATFORM_ARM64_RPI = n/CONFIG_PLATFORM_ARM64_RPI = y/' \
+      "${dest}/Makefile"
+  elif [[ "$(uname -m)" == arm* ]]; then
+    sudo sed -i \
+      -e 's/^CONFIG_PLATFORM_I386_PC = y/CONFIG_PLATFORM_I386_PC = n/' \
+      -e 's/^CONFIG_PLATFORM_ARM_RPI = n/CONFIG_PLATFORM_ARM_RPI = y/' \
+      "${dest}/Makefile"
+  fi
+}
+
+install_dkms_driver_repo() {
+  local label="$1"
+  local url="$2"
+  local dest="$3"
+  local installer="${4:-auto}"
+
+  say "Installing ${label}"
+  clone_repo_if_needed "${url}" "${dest}"
+  update_repo_if_needed "${dest}"
+
+  (
+    cd "${dest}"
+    case "${installer}" in
+      aircrack)
+        prepare_aircrack_rpi_platform "${dest}"
+        sudo make dkms_install
+        ;;
+      morrownr)
+        if [[ -x ./install-driver.sh ]]; then
+          sudo ./install-driver.sh NoPrompt
+        else
+          sudo make dkms_install
+        fi
+        ;;
+      *)
+        if [[ -x ./install-driver.sh ]]; then
+          sudo ./install-driver.sh NoPrompt
+        elif make -n dkms_install >/dev/null 2>&1; then
+          sudo make dkms_install
+        else
+          sudo make
+          sudo make install
+        fi
+        ;;
+    esac
+  )
+}
+
+detect_monitor_driver_choices() {
+  local choices=("rtl8812au" "rtl8821au" "ath9k_htc" "mt76")
+  if command -v lsusb >/dev/null 2>&1; then
+    if lsusb | grep -Eiq '2357:011e|RTL8811AU|RTL8821AU|Archer T2U'; then
+      choices+=("rtl8821au")
+    fi
+    if lsusb | grep -Eiq 'RTL8812AU|RTL8814AU|AWUS036ACH|0bda:8812|0bda:8814'; then
+      choices+=("rtl8812au")
+    fi
+    if lsusb | grep -Eiq 'AR9271|0cf3:9271|TL-WN722N'; then
+      choices+=("ath9k_htc")
+    fi
+    if lsusb | grep -Eiq '0e8d:7610|MediaTek'; then
+      choices+=("mt76")
+    fi
+  fi
+  merge_unique_words "${choices[@]}" | xargs
+}
+
+install_monitor_driver_set() {
+  local selected="$1"
+  local driver=""
+  local driver_root="${PROJECTS_DIR}/drivers"
+  mkdir -p "${driver_root}"
+  if [[ "$(id -u)" -eq 0 && "${RUN_USER}" != "root" ]]; then
+    chown "${RUN_USER}:${RUN_USER}" "${driver_root}" || true
+  fi
+
+  prepare_driver_build_packages
+
+  for driver in ${selected}; do
+    case "${driver}" in
+      rtl8812au|8812au|88xxau)
+        install_dkms_driver_repo \
+          "rtl8812au / rtl8821au / rtl8814au monitor driver" \
+          "https://github.com/aircrack-ng/rtl8812au.git" \
+          "${driver_root}/rtl8812au" \
+          "aircrack"
+        ;;
+      rtl8821au|8821au|8811au)
+        install_dkms_driver_repo \
+          "rtl8811au / rtl8821au monitor driver" \
+          "https://github.com/morrownr/8821au-20210708.git" \
+          "${driver_root}/8821au-20210708" \
+          "morrownr"
+        ;;
+      rtl88x2bu|88x2bu|8812bu|8822bu)
+        install_dkms_driver_repo \
+          "rtl8812bu / rtl8822bu monitor driver" \
+          "https://github.com/morrownr/88x2bu-20210702.git" \
+          "${driver_root}/88x2bu-20210702" \
+          "morrownr"
+        ;;
+      rtl8821cu|8821cu|8811cu)
+        install_dkms_driver_repo \
+          "rtl8811cu / rtl8821cu monitor driver" \
+          "https://github.com/morrownr/8821cu-20210916.git" \
+          "${driver_root}/8821cu-20210916" \
+          "morrownr"
+        ;;
+      ath9k_htc|ar9271|atheros)
+        say "Atheros AR9271 uses the in-kernel ath9k_htc driver; firmware package was requested through apt."
+        ;;
+      mt76|mediatek)
+        say "MediaTek USB adapters such as MT7610U use the in-kernel mt76 stack on current Raspberry Pi OS."
+        ;;
+      "")
+        ;;
+      *)
+        warn "Unknown driver token '${driver}', skipping"
+        ;;
+    esac
+  done
+
+  sudo depmod -a || true
+}
+
+install_tailscale_if_requested() {
+  section "Tailscale"
+  local auth_key=""
+  if ask_yes_no "Install Tailscale for remote maintenance access" "y"; then
+    auth_key="$(ask_secret "Tailscale auth key (blank to install only)")"
+    if [[ -n "${auth_key}" ]]; then
+      sudo TAILSCALE_AUTH_KEY="${auth_key}" TAILSCALE_HOSTNAME="$(hostname 2>/dev/null || echo kari)" "${REPO_DIR}/scripts/tailscalesetup.sh"
+    else
+      sudo "${REPO_DIR}/scripts/tailscalesetup.sh"
+    fi
+    INSTALL_TAILSCALE="true"
+  else
+    INSTALL_TAILSCALE="false"
+  fi
 }
 
 prepare_raspyjack_root_alias() {
@@ -761,6 +1096,7 @@ PY
 }
 
 install_launcher_services() {
+  section "Services"
   say "Installing launcher services"
   sudo KARI_RUN_USER="${RUN_USER}" KARI_DASH_CONFIG="${CFG_PATH}" "${REPO_DIR}/install_dashboard_service.sh"
 }
@@ -794,7 +1130,7 @@ verify_external_plumbing() {
 }
 
 show_summary() {
-  say "DIY install summary"
+  section "Summary"
   printf 'User: %s\n' "${RUN_USER}"
   printf 'Repo: %s\n' "${REPO_DIR}"
   printf 'Config: %s\n' "${CFG_PATH}"
@@ -809,6 +1145,8 @@ show_summary() {
   printf 'Wifite dir: %s\n' "${WIFITE_DIR}"
   printf 'Wifite run command: %s\n' "${WIFITE_RUN_COMMAND:-<blank>}"
   printf 'Kismet integration: %s\n' "${INSTALL_KISMET}"
+  printf 'Tailscale install: %s\n' "${INSTALL_TAILSCALE}"
+  printf 'Monitor driver set: %s\n' "${MONITOR_DRIVER_SET:-<skipped>}"
   printf 'Launcher service install: %s\n' "${INSTALL_SERVICES}"
   printf 'Watchdog install: %s\n' "${INSTALL_WATCHDOG}"
 }
@@ -817,8 +1155,9 @@ main() {
   [[ -d "${REPO_DIR}/src/launcher" ]] || die "Run this from the kari-launcher repo"
   ensure_sudo
 
-  say "This wizard bootstraps K.A.R.I Launcher on Raspberry Pi OS."
-  say "It prepares directories, Python, config, Wi-Fi, and optional launcher integrations."
+  banner
+  note "Target: Raspberry Pi OS on Pi Zero 2 W."
+  note "Goal: stable wlan0 maintenance Wi-Fi, external capture radios, launcher services, and optional tools."
 
   INSTALL_APT="false"
   if ask_yes_no "Install or refresh apt prerequisites" "y"; then
@@ -859,6 +1198,17 @@ main() {
 
   PRIMARY_IFACE="$(ask "Primary maintenance interface" "wlan0")"
   MONITOR_IFACE="$(ask "Monitor/capture interface" "wlan1")"
+  if ask_yes_no "Install K.A.R.I radio naming and NetworkManager rules" "y"; then
+    configure_wifi_identity
+  fi
+  MONITOR_DRIVER_SET=""
+  if ask_yes_no "Install monitor-mode adapter driver support" "y"; then
+    MONITOR_DRIVER_DEFAULT="$(detect_monitor_driver_choices)"
+    MONITOR_DRIVER_SET="$(ask "Driver set (space separated: rtl8812au rtl8821au rtl88x2bu rtl8821cu ath9k_htc mt76)" "${MONITOR_DRIVER_DEFAULT}")"
+    install_monitor_driver_set "${MONITOR_DRIVER_SET}"
+  fi
+  install_tailscale_if_requested
+
   LOCAL_BUTTONS="false"
   if ask_yes_no "Enable local joystick/button input in launcher config" "y"; then
     LOCAL_BUTTONS="true"
